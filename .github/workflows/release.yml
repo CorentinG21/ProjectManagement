@@ -1,0 +1,45 @@
+name: Release
+
+# Se déclenche quand tu pousses un tag de version, ex. v0.1.0
+on:
+  push:
+    tags:
+      - "v*"
+
+# Nécessaire pour que l'action puisse créer la Release et y attacher l'installeur.
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Installer Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache des dépendances Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Installer les dépendances frontend
+        run: npm ci
+
+      - name: Compiler et publier la Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Dev Project Manager ${{ github.ref_name }}"
+          releaseBody: "Téléchargez l'installeur Windows dans les Assets ci-dessous : le fichier `.msi` ou `..._x64-setup.exe`. Double-cliquez pour installer."
+          releaseDraft: false
+          prerelease: false
