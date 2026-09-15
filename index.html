@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dev Project Manager</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div class="app">
+      <!-- ---------- Sidebar ---------- -->
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">❯_</span>
+          <span class="brand-name">DevManager</span>
+        </div>
+
+        <button id="scan-btn" class="btn btn-primary btn-block">
+          <span class="btn-label">Scanner mes projets</span>
+        </button>
+
+        <nav class="nav" id="nav"></nav>
+
+        <div class="side-card" id="side-card" hidden></div>
+      </aside>
+
+      <!-- ---------- Main ---------- -->
+      <div class="main">
+        <header class="topbar">
+          <div class="search-box" id="search-box"></div>
+          <div class="topbar-right">
+            <button id="theme-btn" class="icon-btn" title="Changer de thème"></button>
+            <button id="refresh-btn" class="icon-btn" title="Rescanner"></button>
+            <div class="user">
+              <div class="avatar">CG</div>
+              <span class="user-name">Corentin</span>
+            </div>
+          </div>
+        </header>
+
+        <div class="view" id="view"></div>
+      </div>
+    </div>
+
+    <!-- Modale de confirmation de suppression -->
+    <div id="modal" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true">
+        <h3 id="modal-title">Supprimer le projet ?</h3>
+        <p id="modal-body"></p>
+        <div class="modal-actions">
+          <button id="modal-cancel" class="btn btn-ghost">Annuler</button>
+          <button id="modal-confirm" class="btn btn-danger">Envoyer à la corbeille</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Notifications -->
+    <div id="toasts" class="toasts"></div>
+  </body>
+</html>
