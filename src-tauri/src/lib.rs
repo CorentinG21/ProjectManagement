@@ -188,8 +188,7 @@ fn inspect_repo(dir: &Path) -> ProjectInfo {
                         if let (Some(local_oid), Some(up_oid)) =
                             (head.target(), upstream.get().target())
                         {
-                            if let Ok((ahead, behind)) =
-                                repo.graph_ahead_behind(local_oid, up_oid)
+                            if let Ok((ahead, behind)) = repo.graph_ahead_behind(local_oid, up_oid)
                             {
                                 info.ahead = Some(ahead);
                                 info.behind = Some(behind);
@@ -266,7 +265,14 @@ fn default_roots() -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(home) = std::env::var("USERPROFILE") {
         let base = PathBuf::from(&home);
-        for sub in ["Desktop", "Documents", "source\\repos", "dev", "Projects", "git"] {
+        for sub in [
+            "Desktop",
+            "Documents",
+            "source\\repos",
+            "dev",
+            "Projects",
+            "git",
+        ] {
             let candidate = base.join(sub);
             if candidate.is_dir() {
                 out.push(candidate.to_string_lossy().to_string());
@@ -495,6 +501,8 @@ fn recent_commits(path: String) -> Vec<CommitLog> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             scan_projects,

@@ -1334,6 +1334,67 @@ function initTheme(): void {
   applyTheme(saved);
 }
 
+// ---------- Mises à jour ----------
+interface TauriUpdate {
+  version: string;
+  downloadAndInstall: (onEvent?: (event: unknown) => void) => Promise<void>;
+}
+let pendingUpdate: TauriUpdate | null = null;
+
+async function checkForUpdate(): Promise<void> {
+  if (!IN_TAURI) {
+    // Aperçu navigateur : bandeau de démo si l'URL contient ?demo-update.
+    if (location.search.includes("demo-update")) showUpdateBanner("0.1.2");
+    return;
+  }
+  try {
+    const { check } = await import("@tauri-apps/plugin-updater");
+    const update = (await check()) as unknown as TauriUpdate | null;
+    if (update) {
+      pendingUpdate = update;
+      showUpdateBanner(update.version);
+    }
+  } catch (e) {
+    // Silencieux : pas de réseau ou pas de release → on n'embête pas l'utilisateur.
+    console.warn("Vérification de mise à jour impossible", e);
+  }
+}
+
+function showUpdateBanner(version: string): void {
+  const text = document.getElementById("update-text");
+  if (text) {
+    text.textContent = `Version ${version} disponible — installe-la pour la dernière version.`;
+  }
+  const banner = document.getElementById("update-banner");
+  if (banner) banner.hidden = false;
+}
+
+async function doInstallUpdate(): Promise<void> {
+  const btn = document.getElementById("update-install") as HTMLButtonElement | null;
+  if (!IN_TAURI || !pendingUpdate) {
+    if (btn) btn.textContent = "(démo) indisponible dans l'aperçu";
+    return;
+  }
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Téléchargement…";
+  }
+  try {
+    await pendingUpdate.downloadAndInstall((event) => {
+      const e = event as { event?: string };
+      if (btn && e.event === "Finished") btn.textContent = "Installation…";
+    });
+    const { relaunch } = await import("@tauri-apps/plugin-process");
+    await relaunch();
+  } catch (err) {
+    toast("err", "Mise à jour échouée", String(err));
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Réessayer";
+    }
+  }
+}
+
 // ---------- Init ----------
 async function init(): Promise<void> {
   $("#search-box").innerHTML = `${icon(
@@ -1401,6 +1462,14 @@ async function init(): Promise<void> {
       render();
     }
   });
+
+  // Bandeau de mise à jour
+  $("#update-install").addEventListener("click", doInstallUpdate);
+  $("#update-later").addEventListener("click", () => {
+    const banner = document.getElementById("update-banner");
+    if (banner) banner.hidden = true;
+  });
+  checkForUpdate();
 
   // Détection automatique au démarrage si des dossiers sont déjà connus.
   if (roots.length > 0) {
