@@ -325,20 +325,78 @@ function countFor(key: string): number {
 }
 
 // ---------- Badges & libellés ----------
+// Un badge de statut avec une infobulle explicative au survol (attribut title).
+function badge(cls: string, text: string, tip: string): string {
+  return `<span class="badge ${cls}" title="${esc(tip)}">${text}</span>`;
+}
+
 function statusBadges(p: ProjectInfo, compact = false): string {
-  if (p.error) return `<span class="badge red">Erreur Git</span>`;
+  if (p.error) {
+    return badge(
+      "red",
+      "Erreur Git",
+      "Impossible de lire l'état Git de ce dépôt (corrompu ou inaccessible).",
+    );
+  }
   const b: string[] = [];
-  if (!p.hasRemote) b.push(`<span class="badge red">Sans remote</span>`);
-  else if (!p.hasUpstream) b.push(`<span class="badge amber">Jamais poussée</span>`);
-  if (p.isDirty) b.push(`<span class="badge amber">Modifs locales</span>`);
+  if (!p.hasRemote) {
+    b.push(
+      badge(
+        "red",
+        "Sans remote",
+        "Aucun dépôt distant configuré : le projet n'existe que sur ce PC, il n'est sauvegardé nulle part.",
+      ),
+    );
+  } else if (!p.hasUpstream) {
+    b.push(
+      badge(
+        "amber",
+        "Jamais poussée",
+        "Un remote existe, mais la branche courante n'y a jamais été envoyée (aucun git push).",
+      ),
+    );
+  }
+  if (p.isDirty) {
+    b.push(
+      badge(
+        "amber",
+        "Modifs locales",
+        "Des fichiers modifiés ou nouveaux ne sont pas encore commités.",
+      ),
+    );
+  }
   if ((p.ahead ?? 0) > 0) {
-    b.push(`<span class="badge amber">${p.ahead} non poussé${p.ahead! > 1 ? "s" : ""}</span>`);
+    b.push(
+      badge(
+        "amber",
+        `${p.ahead} non poussé${p.ahead! > 1 ? "s" : ""}`,
+        "Des commits faits sur ce PC ne sont pas encore envoyés sur le remote (git push).",
+      ),
+    );
   }
   if ((p.behind ?? 0) > 0 && !compact) {
-    b.push(`<span class="badge neutral">${p.behind} en retard</span>`);
+    b.push(
+      badge(
+        "neutral",
+        `${p.behind} en retard`,
+        "Le remote a des commits que tu n'as pas encore récupérés (git pull).",
+      ),
+    );
   }
-  if (p.safeToDelete) b.push(`<span class="badge green">Sauvegardé</span>`);
-  if (b.length === 0) b.push(`<span class="badge green">Propre</span>`);
+  if (p.safeToDelete) {
+    b.push(
+      badge(
+        "green",
+        "Sauvegardé",
+        "Tout est commité et poussé sur le remote : suppression sans perte.",
+      ),
+    );
+  }
+  if (b.length === 0) {
+    b.push(
+      badge("green", "Propre", "Aucune modification en attente : le dossier de travail est propre."),
+    );
+  }
   return b.join("");
 }
 
@@ -458,7 +516,12 @@ function rowHtml(p: ProjectInfo): string {
         <div class="row-size">${size}</div>
         <div>${esc(commit)}</div>
       </div>
-      <div class="row-chevron">${icon("chevron")}</div>
+      <div class="row-end">
+        <button class="row-del" data-action="delete" data-path="${esc(
+          p.path,
+        )}" title="Supprimer (envoi à la corbeille)">${icon("trash")}</button>
+        <span class="row-chevron">${icon("chevron")}</span>
+      </div>
     </div>`;
 }
 
@@ -504,9 +567,9 @@ function renderDetail(p: ProjectInfo): void {
       )}<div><strong>Suppression sûre</strong>Ce projet est intégralement sauvegardé sur son remote — tu peux le supprimer sans rien perdre.</div></div>`
     : `<div class="safe-box no">${icon(
         "alert",
-      )}<div><strong>Suppression bloquée</strong>${esc(
+      )}<div><strong>Pas entièrement sauvegardé</strong>${esc(
         unsafeReasons(p).join(" · ") || "état inconnu",
-      )}</div></div>`;
+      )}. La suppression reste possible, mais ces éléments locaux seront perdus (récupérables dans la corbeille).</div></div>`;
 
   const cells: { k: string; v: string; mono?: boolean }[] = [
     { k: "Branche", v: p.branch ?? "—" },
@@ -563,11 +626,9 @@ function renderDetail(p: ProjectInfo): void {
       <button class="btn" data-action="pull" data-path="${esc(p.path)}" ${
         p.hasUpstream ? "" : "disabled"
       }>${icon("pull")} Pull</button>
-      <button class="btn btn-danger" data-action="delete" data-path="${esc(p.path)}" ${
-        p.safeToDelete ? "" : "disabled"
-      } title="${
-        p.safeToDelete ? "Envoyer à la corbeille" : "Projet non entièrement sauvegardé"
-      }">${icon("trash")} Supprimer</button>
+      <button class="btn btn-danger" data-action="delete" data-path="${esc(
+        p.path,
+      )}" title="Envoyer à la corbeille (local uniquement)">${icon("trash")} Supprimer</button>
     </div>`;
 }
 
@@ -776,9 +837,17 @@ async function doPull(p: ProjectInfo): Promise<void> {
 
 function askDelete(p: ProjectInfo): void {
   const modal = $("#modal");
-  $("#modal-body").innerHTML = `Le projet <strong>${esc(
-    p.name,
-  )}</strong> sera déplacé vers la corbeille de Windows (réversible).`;
+  const reasons = p.safeToDelete ? [] : unsafeReasons(p);
+  const warning = reasons.length
+    ? `<div class="modal-warning">⚠️ Ce projet n'est <strong>pas entièrement sauvegardé</strong> : ${esc(
+        reasons.join(" · "),
+      )}. Ces éléments n'existent que sur ce PC et seront perdus (mais récupérables dans la corbeille).</div>`
+    : "";
+  $("#modal-body").innerHTML =
+    `Le projet <strong>${esc(
+      p.name,
+    )}</strong> sera déplacé vers la corbeille de Windows (local uniquement, GitHub n'est pas touché).` +
+    warning;
   const confirmBtn = $<HTMLButtonElement>("#modal-confirm");
   const cancelBtn = $<HTMLButtonElement>("#modal-cancel");
   modal.hidden = false;
@@ -788,18 +857,39 @@ function askDelete(p: ProjectInfo): void {
     cancelBtn.onclick = null;
   };
   cancelBtn.onclick = close;
-  confirmBtn.onclick = async () => {
+  confirmBtn.onclick = () => {
     close();
-    try {
-      await call("delete_project", { path: p.path });
-      projects = projects.filter((x) => x.path !== p.path);
-      if (viewMode === "detail") viewMode = "list";
-      render();
-      toast("ok", `${p.name} envoyé à la corbeille`);
-    } catch (e) {
-      toast("err", `Suppression impossible — ${p.name}`, String(e));
-    }
+    performDelete(p);
   };
+}
+
+// Supprime réellement, avec retour visuel immédiat : animation de la ligne
+// dans la liste, sinon retour à la liste depuis la fiche détail.
+async function performDelete(p: ProjectInfo): Promise<void> {
+  try {
+    await call("delete_project", { path: p.path });
+  } catch (e) {
+    toast("err", `Suppression impossible — ${p.name}`, String(e));
+    return;
+  }
+  toast("ok", `${p.name} envoyé à la corbeille`);
+
+  const row =
+    viewMode === "list"
+      ? document.querySelector<HTMLElement>(`.row[data-path="${cssEscape(p.path)}"]`)
+      : null;
+
+  if (row) {
+    row.classList.add("row--removing");
+    window.setTimeout(() => {
+      projects = projects.filter((x) => x.path !== p.path);
+      render();
+    }, 260);
+  } else {
+    projects = projects.filter((x) => x.path !== p.path);
+    if (viewMode === "detail") viewMode = "list";
+    render();
+  }
 }
 
 async function openDetail(path: string): Promise<void> {

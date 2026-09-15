@@ -521,13 +521,20 @@ svg {
 
 .row {
   display: grid;
-  grid-template-columns: 40px minmax(0, 2.2fr) 1fr auto 28px;
+  grid-template-columns: 40px minmax(0, 2.2fr) 1fr auto auto;
   align-items: center;
   gap: 16px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
-  transition: background 0.1s ease;
+  transition: background 0.1s ease, opacity 0.25s ease, transform 0.25s ease;
+}
+
+/* Animation de disparition lors d'une suppression. */
+.row--removing {
+  opacity: 0;
+  transform: translateX(26px);
+  pointer-events: none;
 }
 
 .row:last-child {
@@ -607,6 +614,39 @@ svg {
   font-family: var(--mono);
   color: var(--text-dim);
   font-weight: 600;
+}
+
+.row-end {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.row-del {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+.row-del svg {
+  width: 16px;
+  height: 16px;
+}
+
+.row:hover .row-del {
+  opacity: 1;
+}
+
+.row-del:hover {
+  color: var(--red);
+  background: var(--red-soft);
 }
 
 .row-chevron {
@@ -1028,6 +1068,31 @@ svg {
   font-family: var(--mono);
 }
 
+.modal-body {
+  color: var(--text-dim);
+  margin: 0 0 18px;
+  line-height: 1.55;
+}
+
+.modal-body strong {
+  color: var(--text);
+}
+
+.modal-warning {
+  margin-top: 12px;
+  background: var(--amber-soft);
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  border-radius: var(--radius-sm);
+  padding: 11px 13px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.modal-warning strong {
+  color: var(--amber);
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
@@ -1135,11 +1200,14 @@ svg {
     padding: 14px 16px;
   }
   .row {
-    grid-template-columns: 36px 1fr 24px;
+    grid-template-columns: 36px 1fr auto;
   }
   .row-badges,
   .row-meta {
     display: none;
+  }
+  .row-del {
+    opacity: 1; /* pas de survol sur mobile : toujours visible */
   }
   .stats {
     grid-template-columns: 1fr;
