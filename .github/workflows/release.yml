@@ -42,6 +42,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Dev Project Manager ${{ github.ref_name }}"
-          releaseBody: "Téléchargez l'installeur Windows dans les Assets ci-dessous : le fichier `.msi` ou `..._x64-setup.exe`. Double-cliquez pour installer."
+          releaseBody: "Téléchargez l'installeur Windows dans les Assets ci-dessous : le fichier `..._x64-setup.exe`. Double-cliquez pour installer."
           releaseDraft: false
           prerelease: false
