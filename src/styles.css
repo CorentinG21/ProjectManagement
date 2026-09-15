@@ -598,6 +598,28 @@ svg {
   gap: 10px;
 }
 
+/* ---------- Bandeau de scan en cours ---------- */
+.scan-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--primary-soft);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.spinner-sm {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+
 /* ---------- Barre d'actions groupées ---------- */
 .bulk-bar {
   display: flex;

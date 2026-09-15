@@ -1,6 +1,6 @@
 [package]
 name = "dev-project-manager"
-version = "0.1.3"
+version = "0.1.4"
 description = "Gestionnaire de projets Git locaux"
 authors = ["Corentin Godon"]
 edition = "2021"

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 // ---------- Types ----------
 interface ProjectInfo {
@@ -87,6 +88,19 @@ let theme: Theme = "light";
 const readmeCache = new Map<string, string | null>();
 const commitsCache = new Map<string, CommitLog[]>();
 const selection = new Set<string>();
+let renderScheduled = false;
+
+// Pendant un scan, des dizaines de projets peuvent arriver en quelques
+// millisecondes (évènements "project-found") : on regroupe les rendus au
+// lieu de redessiner toute la liste à chaque évènement.
+function scheduleRender(): void {
+  if (renderScheduled) return;
+  renderScheduled = true;
+  setTimeout(() => {
+    renderScheduled = false;
+    render();
+  }, 150);
+}
 
 // ---------- Helpers ----------
 function $<T extends HTMLElement>(selector: string): T {
@@ -557,11 +571,26 @@ function rowHtml(p: ProjectInfo): string {
     </div>`;
 }
 
+function scanBannerHtml(): string {
+  if (!loading) return "";
+  return `<div class="scan-banner"><span class="spinner spinner-sm"></span>Scan en cours… ${projects.length} projet${
+    projects.length > 1 ? "s" : ""
+  } trouvé${projects.length > 1 ? "s" : ""} pour l'instant</div>`;
+}
+
 function renderList(): void {
   const view = $("#view");
   if (projects.length === 0) {
-    view.innerHTML = `
-      ${pageHead("Vue d'ensemble", "Tous les projets Git détectés dans tes dossiers.")}
+    view.innerHTML = loading
+      ? `
+        ${pageHead(currentTitle(), currentSubtitle())}
+        <div class="state">
+          <div class="spinner"></div>
+          <h2>Scan en cours…</h2>
+          <p>Les projets apparaissent ici au fur et à mesure qu'ils sont trouvés.</p>
+        </div>`
+      : `
+      ${pageHead(currentTitle(), currentSubtitle())}
       <div class="state">
         <div class="state-icon">${icon("folder")}</div>
         <h2>Aucun projet Git trouvé</h2>
@@ -579,6 +608,7 @@ function renderList(): void {
       : "";
   view.innerHTML = `
     ${pageHead(currentTitle(), currentSubtitle())}
+    ${scanBannerHtml()}
     ${statsHtml()}
     ${chart}
     <div id="bulk-bar" class="bulk-bar" hidden></div>
@@ -746,19 +776,11 @@ function renderWelcome(): void {
     </div>`;
 }
 
-function renderLoading(): void {
-  $("#view").innerHTML = `<div class="state"><div class="spinner"></div><h2>Scan en cours…</h2><p>Analyse des dépôts Git dans tes dossiers.</p></div>`;
-}
-
 function render(): void {
   renderNav();
   renderSideCard();
   if (viewMode === "settings") {
     renderSettings();
-    return;
-  }
-  if (loading) {
-    renderLoading();
     return;
   }
   if (!scanned) {
@@ -843,19 +865,26 @@ async function scan(): Promise<void> {
     render();
     return;
   }
+  // On vide la liste et on bascule sur la vue liste tout de suite : les
+  // projets apparaissent au fil du scan (évènements "project-found"), et la
+  // nav/recherche restent utilisables pendant que ça tourne en arrière-plan.
+  projects = [];
+  scanned = true;
   loading = true;
-  if (viewMode === "detail") viewMode = "list";
+  viewMode = "list";
   setScanBusy(true);
   render();
   const token = ++scanToken;
   try {
-    projects = await call<ProjectInfo[]>("scan_projects", { roots });
-    scanned = true;
+    const found = await call<ProjectInfo[]>("scan_projects", { roots });
+    if (token !== scanToken) return;
+    projects = found;
     loading = false;
     setScanBusy(false);
     render();
     fetchSizes(token);
   } catch (e) {
+    if (token !== scanToken) return;
     loading = false;
     setScanBusy(false);
     render();
@@ -1420,6 +1449,18 @@ async function init(): Promise<void> {
 
   $("#scan-btn").addEventListener("click", scan);
   $("#refresh-btn").addEventListener("click", scan);
+
+  // Projets renvoyés en flux par le backend pendant un scan : on les ajoute
+  // au fur et à mesure au lieu d'attendre la fin complète du scan.
+  if (IN_TAURI) {
+    await listen<ProjectInfo>("project-found", (event) => {
+      if (!loading) return;
+      const p = event.payload;
+      if (projects.some((x) => x.path === p.path)) return;
+      projects.push(p);
+      scheduleRender();
+    });
+  }
 
   $("#search").addEventListener("input", (e) => {
     search = (e.target as HTMLInputElement).value;

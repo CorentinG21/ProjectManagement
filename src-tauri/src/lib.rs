@@ -7,9 +7,11 @@
 // sauvegardé sur son remote.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use git2::{BranchType, Repository, StatusOptions};
 use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 
 /// Dossiers dans lesquels on ne descend jamais pendant le scan : soit ils sont
 /// énormes (node_modules…) et ruineraient les perfs, soit ils ne contiennent
@@ -207,9 +209,41 @@ fn inspect_repo(dir: &Path) -> ProjectInfo {
     info
 }
 
+/// Enlève les racines déjà couvertes par une autre racine de la liste (ex:
+/// `D:\Dev` et `D:\` donneraient sinon les mêmes projets deux fois, et on
+/// scannerait `D:\Dev` en double). Garde les chemins les plus courts d'abord.
+///
+/// La comparaison se fait sur le chemin canonique (résout `..`, la casse du
+/// lecteur, les liens symboliques…) mais on conserve le chemin d'origine pour
+/// le scan/l'affichage : `canonicalize` préfixe les chemins Windows avec
+/// `\\?\`, qu'on ne veut pas voir apparaître dans l'UI.
+fn dedupe_roots(roots: Vec<String>) -> Vec<PathBuf> {
+    let mut paths: Vec<(PathBuf, PathBuf)> = roots
+        .into_iter()
+        .map(PathBuf::from)
+        .map(|p| {
+            let canon = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            (p, canon)
+        })
+        .collect();
+    paths.sort_by_key(|(_, canon)| canon.components().count());
+
+    let mut kept: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (original, canon) in paths {
+        if !kept.iter().any(|(_, k)| canon.starts_with(k)) {
+            kept.push((original, canon));
+        }
+    }
+    kept.into_iter().map(|(original, _)| original).collect()
+}
+
 /// Parcours récursif d'un dossier. S'arrête dès qu'un dépôt Git est trouvé
 /// (on ne descend jamais dans un projet), et ignore les dossiers lourds/cachés.
-fn scan_dir(dir: &Path, depth: usize, out: &mut Vec<ProjectInfo>) {
+/// Au premier niveau sous chaque racine, les sous-dossiers sont explorés en
+/// parallèle (un thread par sous-dossier) pour accélérer les scans sur de
+/// gros disques. Chaque projet trouvé est envoyé immédiatement au frontend
+/// via un évènement, en plus d'être accumulé dans `results`.
+fn scan_dir(dir: &Path, depth: usize, app: &AppHandle, results: &Arc<Mutex<Vec<ProjectInfo>>>) {
     if depth > MAX_DEPTH {
         return;
     }
@@ -217,7 +251,9 @@ fn scan_dir(dir: &Path, depth: usize, out: &mut Vec<ProjectInfo>) {
     // Un dossier contenant ".git" (dossier ou fichier pour les worktrees) est
     // un projet : on l'inspecte et on ne descend pas plus loin.
     if dir.join(".git").exists() {
-        out.push(inspect_repo(dir));
+        let info = inspect_repo(dir);
+        let _ = app.emit("project-found", &info);
+        results.lock().unwrap().push(info);
         return;
     }
 
@@ -226,35 +262,63 @@ fn scan_dir(dir: &Path, depth: usize, out: &mut Vec<ProjectInfo>) {
         Err(_) => return,
     };
 
-    for entry in entries.flatten() {
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
-        // On ignore les liens symboliques (risque de boucle) et les fichiers.
-        if file_type.is_symlink() || !file_type.is_dir() {
-            continue;
+    let subdirs: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            // On ignore les liens symboliques (risque de boucle) et les fichiers.
+            if file_type.is_symlink() || !file_type.is_dir() {
+                return None;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            // Comparaison insensible à la casse : sous Windows "Build"/"Bin"
+            // doivent être ignorés au même titre que "build"/"bin".
+            if name.starts_with('.')
+                || IGNORE_DIRS.iter().any(|d| d.eq_ignore_ascii_case(&name))
+            {
+                return None;
+            }
+            Some(entry.path())
+        })
+        .collect();
+
+    if depth == 0 {
+        std::thread::scope(|scope| {
+            for sub in &subdirs {
+                scope.spawn(move || scan_dir(sub, depth + 1, app, results));
+            }
+        });
+    } else {
+        for sub in &subdirs {
+            scan_dir(sub, depth + 1, app, results);
         }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with('.') || IGNORE_DIRS.contains(&name.as_ref()) {
-            continue;
-        }
-        scan_dir(&entry.path(), depth + 1, out);
     }
 }
 
 /// Scanne une liste de dossiers racines et renvoie les projets trouvés,
-/// triés par nom (insensible à la casse).
+/// triés par nom (insensible à la casse). Les racines redondantes sont
+/// éliminées avant le scan, et chaque racine restante est scannée dans son
+/// propre thread pour paralléliser le travail disque.
 #[tauri::command]
-fn scan_projects(roots: Vec<String>) -> Vec<ProjectInfo> {
-    let mut out = Vec::new();
-    for root in roots {
-        let path = PathBuf::from(&root);
-        if path.is_dir() {
-            scan_dir(&path, 0, &mut out);
+fn scan_projects(app: AppHandle, roots: Vec<String>) -> Vec<ProjectInfo> {
+    let roots = dedupe_roots(roots);
+    let results: Arc<Mutex<Vec<ProjectInfo>>> = Arc::new(Mutex::new(Vec::new()));
+
+    std::thread::scope(|scope| {
+        for root in &roots {
+            if !root.is_dir() {
+                continue;
+            }
+            let results = Arc::clone(&results);
+            let app = app.clone();
+            scope.spawn(move || scan_dir(root, 0, &app, &results));
         }
-    }
+    });
+
+    let mut out = Arc::try_unwrap(results)
+        .map(|m| m.into_inner().unwrap())
+        .unwrap_or_default();
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     out
 }
