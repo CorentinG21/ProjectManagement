@@ -514,6 +514,177 @@ svg {
   font-size: 15px;
 }
 
+.panel-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ---------- Barre d'actions groupées ---------- */
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--primary-soft);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 14px;
+}
+
+.bulk-count {
+  font-weight: 650;
+  color: var(--primary);
+}
+
+.bulk-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- Graphique donut ---------- */
+.chart-panel {
+  margin-bottom: 18px;
+}
+
+.chart {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  padding: 20px;
+  flex-wrap: wrap;
+}
+
+.donut {
+  width: 160px;
+  height: 160px;
+  flex-shrink: 0;
+}
+
+.donut circle {
+  transition: stroke-dasharray 0.4s ease, stroke-dashoffset 0.4s ease;
+}
+
+.donut-total {
+  font-size: 5px;
+  font-weight: 700;
+  fill: var(--text);
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+.legend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-width: 200px;
+}
+
+.leg {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.leg-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.leg-name {
+  flex: 1;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leg-val {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.chart-empty {
+  padding: 30px 20px;
+  color: var(--text-faint);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* ---------- Derniers commits (fiche détail) ---------- */
+.commits-block {
+  margin-bottom: 22px;
+}
+
+.commits-block .k {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.commits {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.commit {
+  display: flex;
+  gap: 12px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.commit:last-child {
+  border-bottom: none;
+}
+
+.commit-hash {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  padding: 2px 7px;
+  border-radius: 6px;
+  height: fit-content;
+}
+
+.commit-main {
+  min-width: 0;
+}
+
+.commit-summary {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commit-meta {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+
+.commits-empty {
+  color: var(--text-faint);
+  font-size: 13px;
+  padding: 8px 0;
+}
+
 .list {
   display: flex;
   flex-direction: column;
@@ -521,13 +692,25 @@ svg {
 
 .row {
   display: grid;
-  grid-template-columns: 40px minmax(0, 2.2fr) 1fr auto auto;
+  grid-template-columns: 22px 40px minmax(0, 2.2fr) 1fr auto auto;
   align-items: center;
   gap: 16px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
   transition: background 0.1s ease, opacity 0.25s ease, transform 0.25s ease;
+}
+
+.row.is-selected {
+  background: var(--primary-soft);
+}
+
+.row-check {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--primary);
+  margin: 0;
 }
 
 /* Animation de disparition lors d'une suppression. */
@@ -1200,7 +1383,7 @@ svg {
     padding: 14px 16px;
   }
   .row {
-    grid-template-columns: 36px 1fr auto;
+    grid-template-columns: 22px 36px 1fr auto;
   }
   .row-badges,
   .row-meta {

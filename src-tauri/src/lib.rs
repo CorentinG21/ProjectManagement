@@ -311,12 +311,11 @@ fn delete_project(path: String) -> Result<(), String> {
     trash::delete(&path).map_err(|e| e.to_string())
 }
 
-/// Met à jour un projet via `git pull --ff-only` (jamais de merge surprise).
-#[tauri::command]
-fn pull_project(path: String) -> Result<String, String> {
+/// Exécute une commande `git -C <path> <args>` sans flash de console (Windows),
+/// et renvoie stdout (ou stderr) en cas de succès, l'erreur sinon.
+fn run_git(path: &str, args: &[&str]) -> Result<String, String> {
     let mut cmd = std::process::Command::new("git");
-    cmd.args(["-C", &path, "pull", "--ff-only"]);
-    // Évite le flash d'une fenêtre console sur Windows.
+    cmd.arg("-C").arg(path).args(args);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -330,6 +329,28 @@ fn pull_project(path: String) -> Result<String, String> {
     } else {
         Err(if stderr.is_empty() { stdout } else { stderr })
     }
+}
+
+/// Met à jour un projet via `git pull --ff-only` (jamais de merge surprise).
+#[tauri::command]
+fn pull_project(path: String) -> Result<String, String> {
+    run_git(&path, &["pull", "--ff-only"])
+}
+
+/// Récupère les refs distantes sans fusionner (`git fetch --prune`), puis
+/// renvoie l'état Git réactualisé du projet (avance/retard à jour).
+#[tauri::command]
+fn fetch_project(path: String) -> Result<ProjectInfo, String> {
+    run_git(&path, &["fetch", "--prune"])?;
+    Ok(inspect_repo(&PathBuf::from(&path)))
+}
+
+/// Pousse la branche courante (`git push -u origin HEAD` : crée le suivi
+/// distant si besoin), puis renvoie l'état Git réactualisé.
+#[tauri::command]
+fn push_project(path: String) -> Result<ProjectInfo, String> {
+    run_git(&path, &["push", "-u", "origin", "HEAD"])?;
+    Ok(inspect_repo(&PathBuf::from(&path)))
 }
 
 /// Ouvre le dossier du projet dans l'explorateur de fichiers.
@@ -413,6 +434,64 @@ fn pick_folder() -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
+/// Ouvre une URL http(s) dans le navigateur par défaut.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("URL non autorisée".into());
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "start", "", &url]);
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+        cmd.spawn().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Plateforme non supportée".into())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitLog {
+    hash: String,
+    summary: String,
+    author: String,
+    timestamp: i64,
+}
+
+/// Renvoie les 5 derniers commits de la branche courante.
+#[tauri::command]
+fn recent_commits(path: String) -> Vec<CommitLog> {
+    let mut out = Vec::new();
+    let repo = match Repository::open(&path) {
+        Ok(r) => r,
+        Err(_) => return out,
+    };
+    let mut walk = match repo.revwalk() {
+        Ok(w) => w,
+        Err(_) => return out,
+    };
+    if walk.push_head().is_err() {
+        return out;
+    }
+    for oid in walk.take(5).flatten() {
+        if let Ok(commit) = repo.find_commit(oid) {
+            out.push(CommitLog {
+                hash: oid.to_string().chars().take(7).collect(),
+                summary: commit.summary().unwrap_or("").to_string(),
+                author: commit.author().name().unwrap_or("").to_string(),
+                timestamp: commit.time().seconds(),
+            });
+        }
+    }
+    out
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -426,7 +505,11 @@ pub fn run() {
             open_folder,
             open_in_editor,
             read_readme,
-            pick_folder
+            pick_folder,
+            fetch_project,
+            push_project,
+            open_url,
+            recent_commits
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

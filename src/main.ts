@@ -18,6 +18,13 @@ interface ProjectInfo {
   sizeBytes?: number; // renseigné en arrière-plan
 }
 
+interface CommitLog {
+  hash: string;
+  summary: string;
+  author: string;
+  timestamp: number;
+}
+
 type Filter = "all" | "safe" | "dirty" | "ahead" | "noremote";
 type ViewMode = "list" | "detail" | "settings";
 type SortBy = "name" | "size" | "commit" | "status";
@@ -78,6 +85,8 @@ let scanToken = 0;
 let sortBy: SortBy = "name";
 let theme: Theme = "light";
 const readmeCache = new Map<string, string | null>();
+const commitsCache = new Map<string, CommitLog[]>();
+const selection = new Set<string>();
 
 // ---------- Helpers ----------
 function $<T extends HTMLElement>(selector: string): T {
@@ -199,6 +208,25 @@ function demoCall<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
   }
   if (cmd === "pick_folder") {
     return Promise.resolve("C:\\Users\\Corentin\\Desktop\\Nouveau-dossier (démo)" as unknown as T);
+  }
+  if (cmd === "recent_commits") {
+    return Promise.resolve([
+      { hash: "a1b2c3d", summary: "Ajout de la vue dashboard", author: "Corentin", timestamp: now - 3600 },
+      { hash: "e4f5a6b", summary: "Correction du scan récursif", author: "Corentin", timestamp: now - 86400 },
+      { hash: "9c8d7e6", summary: "Mise à jour du README", author: "Corentin", timestamp: now - 86400 * 3 },
+    ] as unknown as T);
+  }
+  if (cmd === "fetch_project" || cmd === "push_project") {
+    const src = DEMO_PROJECTS.find((d) => d.path === args.path);
+    if (!src) return Promise.resolve(undefined as unknown as T);
+    const fresh: ProjectInfo = { ...src };
+    if (cmd === "push_project") {
+      fresh.hasRemote = true;
+      fresh.hasUpstream = true;
+      fresh.ahead = 0;
+      fresh.safeToDelete = !fresh.isDirty;
+    }
+    return Promise.resolve(fresh as unknown as T);
   }
   return Promise.resolve(undefined as unknown as T);
 }
@@ -501,8 +529,12 @@ function rowHtml(p: ProjectInfo): string {
     : "";
   const size = p.sizeBytes !== undefined ? formatBytes(p.sizeBytes) : "…";
   const commit = p.lastCommit ? formatRelative(p.lastCommit) : "—";
+  const selected = selection.has(p.path);
   return `
-    <div class="row" data-path="${esc(p.path)}">
+    <div class="row ${selected ? "is-selected" : ""}" data-path="${esc(p.path)}">
+      <input type="checkbox" class="row-check" data-check="${esc(p.path)}"${
+        selected ? " checked" : ""
+      } title="Sélectionner ce projet" />
       <div class="row-avatar">${esc(initial)}</div>
       <div class="row-main">
         <div class="row-name">${esc(p.name)} ${branch}<span class="row-tech">${techChips(
@@ -541,21 +573,31 @@ function renderList(): void {
   const rows = visible.length
     ? visible.map(rowHtml).join("")
     : `<div class="state" style="padding:52px 20px"><p>Aucun projet ne correspond à ce filtre.</p></div>`;
+  const chart =
+    filter === "all"
+      ? `<div class="panel chart-panel"><div class="panel-head"><h2>Répartition de l'espace disque</h2></div><div id="overview-chart">${chartBody()}</div></div>`
+      : "";
   view.innerHTML = `
     ${pageHead(currentTitle(), currentSubtitle())}
     ${statsHtml()}
+    ${chart}
+    <div id="bulk-bar" class="bulk-bar" hidden></div>
     <div class="panel">
       <div class="panel-head">
         <h2>${visible.length} projet${visible.length > 1 ? "s" : ""}</h2>
-        <select id="sort-select" class="sort-select">
-          <option value="name"${sortBy === "name" ? " selected" : ""}>Trier : Nom</option>
-          <option value="size"${sortBy === "size" ? " selected" : ""}>Trier : Taille</option>
-          <option value="commit"${sortBy === "commit" ? " selected" : ""}>Trier : Dernier commit</option>
-          <option value="status"${sortBy === "status" ? " selected" : ""}>Trier : Statut</option>
-        </select>
+        <div class="panel-head-right">
+          <button class="btn btn-sm btn-ghost" data-action="select-all">Tout sélectionner</button>
+          <select id="sort-select" class="sort-select">
+            <option value="name"${sortBy === "name" ? " selected" : ""}>Trier : Nom</option>
+            <option value="size"${sortBy === "size" ? " selected" : ""}>Trier : Taille</option>
+            <option value="commit"${sortBy === "commit" ? " selected" : ""}>Trier : Dernier commit</option>
+            <option value="status"${sortBy === "status" ? " selected" : ""}>Trier : Statut</option>
+          </select>
+        </div>
       </div>
       <div class="list">${rows}</div>
     </div>`;
+  updateBulkBar();
 }
 
 function renderDetail(p: ProjectInfo): void {
@@ -616,6 +658,10 @@ function renderDetail(p: ProjectInfo): void {
       <div class="k">Aperçu du README</div>
       <div id="readme-section" class="readme-empty">Chargement…</div>
     </div>
+    <div class="commits-block">
+      <div class="k">Derniers commits</div>
+      <div id="commits-section" class="commits-empty">Chargement…</div>
+    </div>
     <div class="detail-actions">
       <button class="btn" data-action="editor" data-path="${esc(p.path)}">${icon(
         "code",
@@ -623,6 +669,27 @@ function renderDetail(p: ProjectInfo): void {
       <button class="btn" data-action="open" data-path="${esc(p.path)}">${icon(
         "open",
       )} Ouvrir le dossier</button>
+      ${
+        githubWebUrl(p.remoteUrl)
+          ? `<button class="btn" data-action="remote" data-path="${esc(p.path)}">${icon(
+              "branch",
+            )} GitHub</button>`
+          : ""
+      }
+      ${
+        p.hasRemote
+          ? `<button class="btn" data-action="fetch" data-path="${esc(p.path)}">${icon(
+              "refresh",
+            )} Fetch</button>`
+          : ""
+      }
+      ${
+        p.hasRemote
+          ? `<button class="btn" data-action="push" data-path="${esc(p.path)}">${icon(
+              "up",
+            )} Push</button>`
+          : ""
+      }
       <button class="btn" data-action="pull" data-path="${esc(p.path)}" ${
         p.hasUpstream ? "" : "disabled"
       }>${icon("pull")} Pull</button>
@@ -719,6 +786,8 @@ function updateSizesDom(): void {
   if (statEl) statEl.textContent = formatBytes(sum);
   const scEl = document.getElementById("sc-value");
   if (scEl) scEl.textContent = formatBytes(recover);
+  const chartEl = document.getElementById("overview-chart");
+  if (chartEl) chartEl.innerHTML = chartBody();
   for (const p of projects) {
     if (p.sizeBytes === undefined) continue;
     const cell = document.querySelector(
@@ -835,6 +904,260 @@ async function doPull(p: ProjectInfo): Promise<void> {
   }
 }
 
+// Remplace un projet par sa version réactualisée (renvoyée par fetch/push),
+// en conservant la taille déjà calculée.
+function mergeProject(fresh: ProjectInfo): void {
+  const idx = projects.findIndex((p) => p.path === fresh.path);
+  if (idx >= 0) {
+    fresh.sizeBytes = projects[idx].sizeBytes;
+    projects[idx] = fresh;
+  }
+}
+
+async function doFetch(p: ProjectInfo): Promise<void> {
+  toast("info", `Fetch de ${p.name}…`);
+  try {
+    const fresh = await call<ProjectInfo>("fetch_project", { path: p.path });
+    mergeProject(fresh);
+    render();
+    toast("ok", `${p.name} : refs distantes à jour`);
+  } catch (e) {
+    toast("err", `Échec du fetch — ${p.name}`, String(e));
+  }
+}
+
+async function doPush(p: ProjectInfo): Promise<void> {
+  toast("info", `Push de ${p.name}…`);
+  try {
+    const fresh = await call<ProjectInfo>("push_project", { path: p.path });
+    mergeProject(fresh);
+    render();
+    toast("ok", `${p.name} poussé sur le remote`);
+  } catch (e) {
+    toast("err", `Échec du push — ${p.name}`, String(e));
+  }
+}
+
+// Déduit une URL web navigable depuis l'URL du remote (gère SSH et HTTPS).
+function githubWebUrl(remoteUrl: string | null): string | null {
+  if (!remoteUrl) return null;
+  let u = remoteUrl.trim();
+  const ssh = u.match(/^git@([^:]+):(.+)$/);
+  if (ssh) u = `https://${ssh[1]}/${ssh[2]}`;
+  u = u.replace(/\.git$/, "");
+  return u.startsWith("http://") || u.startsWith("https://") ? u : null;
+}
+
+async function doOpenRemote(p: ProjectInfo): Promise<void> {
+  const url = githubWebUrl(p.remoteUrl);
+  if (!url) {
+    toast("err", "Remote", "Impossible de déduire une URL web depuis le remote.");
+    return;
+  }
+  try {
+    await call("open_url", { url });
+  } catch (e) {
+    toast("err", "Ouverture du remote", String(e));
+  }
+}
+
+// ---------- Derniers commits (fiche détail) ----------
+async function loadCommits(path: string): Promise<void> {
+  if (commitsCache.has(path)) {
+    if (selectedPath === path) applyCommits(commitsCache.get(path) ?? []);
+    return;
+  }
+  try {
+    const commits = await call<CommitLog[]>("recent_commits", { path });
+    commitsCache.set(path, commits);
+    if (selectedPath === path) applyCommits(commits);
+  } catch {
+    if (selectedPath === path) applyCommits([]);
+  }
+}
+
+function applyCommits(commits: CommitLog[]): void {
+  const el = document.getElementById("commits-section");
+  if (!el) return;
+  if (!commits.length) {
+    el.className = "commits-empty";
+    el.textContent = "Aucun commit.";
+    return;
+  }
+  el.className = "commits";
+  el.innerHTML = commits
+    .map(
+      (c) =>
+        `<div class="commit"><code class="commit-hash">${esc(
+          c.hash,
+        )}</code><div class="commit-main"><div class="commit-summary">${esc(
+          c.summary,
+        )}</div><div class="commit-meta">${esc(c.author)} · ${esc(
+          formatRelative(c.timestamp),
+        )}</div></div></div>`,
+    )
+    .join("");
+}
+
+// ---------- Graphique donut (espace disque) ----------
+function chartBody(): string {
+  const total = projects.reduce((a, p) => a + (p.sizeBytes ?? 0), 0);
+  if (total === 0) return `<div class="chart-empty">Calcul de l'espace en cours…</div>`;
+  const palette = ["#7b61ff", "#2563eb", "#16a34a", "#d97706", "#db2777", "#0d9488"];
+  const sorted = [...projects]
+    .filter((p) => (p.sizeBytes ?? 0) > 0)
+    .sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0));
+  const top = sorted.slice(0, 6);
+  const topBytes = top.reduce((a, p) => a + (p.sizeBytes ?? 0), 0);
+  const segments = top.map((p, i) => ({
+    label: p.name,
+    bytes: p.sizeBytes ?? 0,
+    color: palette[i],
+  }));
+  const rest = total - topBytes;
+  if (rest > 0) segments.push({ label: "Autres", bytes: rest, color: "#94a3b8" });
+
+  let cumulative = 0;
+  const circles = segments
+    .map((s) => {
+      const pct = (s.bytes / total) * 100;
+      const circle = `<circle cx="21" cy="21" r="15.915" fill="none" stroke="${
+        s.color
+      }" stroke-width="5" stroke-dasharray="${pct.toFixed(3)} ${(100 - pct).toFixed(
+        3,
+      )}" stroke-dashoffset="${(25 - cumulative).toFixed(3)}"/>`;
+      cumulative += pct;
+      return circle;
+    })
+    .join("");
+  const legend = segments
+    .map(
+      (s) =>
+        `<div class="leg"><span class="leg-dot" style="background:${
+          s.color
+        }"></span><span class="leg-name">${esc(s.label)}</span><span class="leg-val">${formatBytes(
+          s.bytes,
+        )}</span></div>`,
+    )
+    .join("");
+  return `<div class="chart"><svg viewBox="0 0 42 42" class="donut">${circles}<text x="21" y="21" class="donut-total">${formatBytes(
+    total,
+  )}</text></svg><div class="legend">${legend}</div></div>`;
+}
+
+// ---------- Sélection multiple ----------
+function toggleSelection(path: string): void {
+  if (selection.has(path)) selection.delete(path);
+  else selection.add(path);
+  syncRow(path);
+  updateBulkBar();
+}
+
+function syncRow(path: string): void {
+  const row = document.querySelector<HTMLElement>(`.row[data-path="${cssEscape(path)}"]`);
+  if (!row) return;
+  const checked = selection.has(path);
+  row.classList.toggle("is-selected", checked);
+  const cb = row.querySelector<HTMLInputElement>("input[data-check]");
+  if (cb) cb.checked = checked;
+}
+
+function updateBulkBar(): void {
+  const bar = document.getElementById("bulk-bar");
+  if (!bar) return;
+  const n = selection.size;
+  if (n === 0) {
+    bar.hidden = true;
+    bar.innerHTML = "";
+    return;
+  }
+  bar.hidden = false;
+  bar.innerHTML = `
+    <span class="bulk-count">${n} projet${n > 1 ? "s" : ""} sélectionné${n > 1 ? "s" : ""}</span>
+    <div class="bulk-actions">
+      <button class="btn btn-sm" data-action="bulk-pull">${icon("pull")} Pull</button>
+      <button class="btn btn-sm btn-danger" data-action="bulk-delete">${icon(
+        "trash",
+      )} Supprimer (${n})</button>
+      <button class="btn btn-sm btn-ghost" data-action="bulk-clear">Désélectionner</button>
+    </div>`;
+}
+
+function selectAllVisible(): void {
+  for (const p of filtered()) selection.add(p.path);
+  render();
+}
+
+function clearSelection(): void {
+  selection.clear();
+  render();
+}
+
+function bulkPull(): void {
+  const targets = [...selection]
+    .map((p) => projectByPath(p))
+    .filter((p): p is ProjectInfo => !!p && p.hasUpstream);
+  if (!targets.length) {
+    toast("info", "Pull", "Aucun projet sélectionné n'a de branche distante à mettre à jour.");
+    return;
+  }
+  toast("info", `Pull de ${targets.length} projet(s)…`);
+  void (async () => {
+    let ok = 0;
+    let fail = 0;
+    for (const t of targets) {
+      try {
+        await call("pull_project", { path: t.path });
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    toast(fail ? "err" : "ok", `Pull terminé : ${ok} OK${fail ? `, ${fail} échec(s)` : ""}`);
+  })();
+}
+
+function bulkDelete(): void {
+  const targets = [...selection]
+    .map((p) => projectByPath(p))
+    .filter((p): p is ProjectInfo => !!p);
+  if (!targets.length) return;
+  const unsafe = targets.filter((t) => !t.safeToDelete).length;
+  const modal = $("#modal");
+  const warning = unsafe
+    ? `<div class="modal-warning">⚠️ ${unsafe} projet(s) sur ${targets.length} ne sont pas entièrement sauvegardés : leurs éléments locaux seront perdus (récupérables dans la corbeille).</div>`
+    : "";
+  $("#modal-body").innerHTML =
+    `<strong>${targets.length}</strong> projet(s) seront déplacés vers la corbeille (local uniquement, GitHub n'est pas touché).` +
+    warning;
+  const confirmBtn = $<HTMLButtonElement>("#modal-confirm");
+  const cancelBtn = $<HTMLButtonElement>("#modal-cancel");
+  modal.hidden = false;
+  const close = () => {
+    modal.hidden = true;
+    confirmBtn.onclick = null;
+    cancelBtn.onclick = null;
+  };
+  cancelBtn.onclick = close;
+  confirmBtn.onclick = async () => {
+    close();
+    let ok = 0;
+    let fail = 0;
+    for (const t of targets) {
+      try {
+        await call("delete_project", { path: t.path });
+        projects = projects.filter((x) => x.path !== t.path);
+        selection.delete(t.path);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    render();
+    toast(fail ? "err" : "ok", `${ok} projet(s) envoyé(s) à la corbeille${fail ? `, ${fail} échec(s)` : ""}`);
+  };
+}
+
 function askDelete(p: ProjectInfo): void {
   const modal = $("#modal");
   const reasons = p.safeToDelete ? [] : unsafeReasons(p);
@@ -892,11 +1215,12 @@ async function performDelete(p: ProjectInfo): Promise<void> {
   }
 }
 
-async function openDetail(path: string): Promise<void> {
+function openDetail(path: string): void {
   selectedPath = path;
   viewMode = "detail";
   render();
-  await loadReadme(path);
+  loadReadme(path);
+  loadCommits(path);
 }
 
 async function loadReadme(path: string): Promise<void> {
@@ -948,6 +1272,22 @@ function onAction(btn: HTMLElement): void {
     browseFolder();
     return;
   }
+  if (action === "select-all") {
+    selectAllVisible();
+    return;
+  }
+  if (action === "bulk-clear") {
+    clearSelection();
+    return;
+  }
+  if (action === "bulk-pull") {
+    bulkPull();
+    return;
+  }
+  if (action === "bulk-delete") {
+    bulkDelete();
+    return;
+  }
   if (action === "remove-root") {
     const root = btn.dataset.root;
     if (root) {
@@ -964,6 +1304,9 @@ function onAction(btn: HTMLElement): void {
   if (action === "open") doOpen(p);
   else if (action === "editor") doOpenEditor(p);
   else if (action === "pull") doPull(p);
+  else if (action === "fetch") doFetch(p);
+  else if (action === "push") doPush(p);
+  else if (action === "remote") doOpenRemote(p);
   else if (action === "delete") askDelete(p);
 }
 
@@ -1037,6 +1380,11 @@ async function init(): Promise<void> {
 
   $("#view").addEventListener("click", (e) => {
     const el = e.target as HTMLElement;
+    const check = el.closest<HTMLInputElement>("input[data-check]");
+    if (check?.dataset.check) {
+      toggleSelection(check.dataset.check);
+      return;
+    }
     const actionBtn = el.closest<HTMLElement>("[data-action]");
     if (actionBtn) {
       onAction(actionBtn);
