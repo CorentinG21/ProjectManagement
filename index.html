@@ -39,6 +39,7 @@
         <header class="topbar">
           <div class="search-box" id="search-box"></div>
           <div class="topbar-right">
+            <button id="palette-btn" class="icon-btn" title="Palette de commandes (Ctrl+K)"></button>
             <button id="theme-btn" class="icon-btn" title="Changer de thème"></button>
             <button id="refresh-btn" class="icon-btn" title="Rescanner"></button>
             <div class="user">
@@ -61,6 +62,14 @@
           <button id="modal-cancel" class="btn btn-ghost">Annuler</button>
           <button id="modal-confirm" class="btn btn-danger">Envoyer à la corbeille</button>
         </div>
+      </div>
+    </div>
+
+    <!-- Palette de commandes (Ctrl+K) -->
+    <div id="palette" class="palette-overlay" hidden>
+      <div class="palette" role="dialog" aria-modal="true">
+        <input id="palette-input" class="palette-input" type="text" placeholder="Tape une commande ou un nom de projet…" autocomplete="off" />
+        <div id="palette-list" class="palette-list"></div>
       </div>
     </div>
 

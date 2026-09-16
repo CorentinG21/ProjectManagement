@@ -26,6 +26,7 @@ git2 = "0.19"
 trash = "5"
 rfd = "0.15"
 tauri-plugin-process = "2"
+tauri-plugin-notification = "2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

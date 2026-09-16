@@ -139,6 +139,9 @@ fn detect_stack(dir: &Path) -> Vec<String> {
     if has("pubspec.yaml") {
         push("Flutter");
     }
+    if has("Dockerfile") || has("docker-compose.yml") || has("compose.yml") {
+        push("Docker");
+    }
     // .NET : présence d'un .sln ou .csproj à la racine.
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -323,9 +326,7 @@ fn scan_dir(dir: &Path, depth: usize, app: &AppHandle, results: &Arc<Mutex<Vec<P
             let name = name.to_string_lossy().to_string();
             // Comparaison insensible à la casse : sous Windows "Build"/"Bin"
             // doivent être ignorés au même titre que "build"/"bin".
-            if name.starts_with('.')
-                || IGNORE_DIRS.iter().any(|d| d.eq_ignore_ascii_case(&name))
-            {
+            if name.starts_with('.') || IGNORE_DIRS.iter().any(|d| d.eq_ignore_ascii_case(&name)) {
                 return None;
             }
             Some(entry.path())
@@ -550,6 +551,434 @@ fn delete_project(path: String) -> Result<(), String> {
     trash::delete(&path).map_err(|e| e.to_string())
 }
 
+// ---------- Gros fichiers & secrets potentiels ----------
+
+const LARGE_FILE_THRESHOLD: u64 = 20 * 1024 * 1024; // 20 Mo
+const SCAN_FILES_DEPTH: usize = 10;
+const MAX_LARGE_FILES: usize = 20;
+const MAX_SECRET_FINDINGS: usize = 30;
+/// Ne scanne le contenu que des fichiers texte raisonnablement petits (évite
+/// les binaires et les très gros fichiers, coûteux à lire pour rien).
+const MAX_TEXT_SCAN_SIZE: u64 = 300_000;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LargeFile {
+    path: String,
+    size_bytes: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretFinding {
+    /// Emplacement (et ligne, pour un match dans le contenu). Ne contient
+    /// JAMAIS la valeur trouvée : uniquement de quoi la localiser.
+    location: String,
+    reason: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesInsight {
+    large_files: Vec<LargeFile>,
+    secrets: Vec<SecretFinding>,
+}
+
+const SENSITIVE_FILENAMES: &[&str] = &[
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "credentials.json",
+];
+const SENSITIVE_EXTENSIONS: &[&str] = &["pem", "pfx", "p12", "key"];
+const TEXT_SCAN_EXTENSIONS: &[&str] = &[
+    "env",
+    "json",
+    "yml",
+    "yaml",
+    "js",
+    "ts",
+    "py",
+    "rb",
+    "php",
+    "java",
+    "txt",
+    "ini",
+    "cfg",
+    "toml",
+    "xml",
+    "properties",
+];
+/// (motif à chercher en minuscules, libellé humain). On ne garde jamais la
+/// valeur trouvée, seulement le fait qu'un motif sensible existe à cet endroit.
+const SECRET_PATTERNS: &[(&str, &str)] = &[
+    ("aws_secret_access_key", "Clé secrète AWS potentielle"),
+    ("aws_access_key_id", "Clé d'accès AWS potentielle"),
+    ("private_key", "Clé privée potentielle"),
+    ("secret_key", "Clé secrète potentielle"),
+    ("secretkey", "Clé secrète potentielle"),
+    ("api_key", "Clé API potentielle"),
+    ("apikey", "Clé API potentielle"),
+    ("password=", "Mot de passe en clair potentiel"),
+    ("passwd=", "Mot de passe en clair potentiel"),
+    ("token=", "Jeton d'authentification potentiel"),
+];
+
+fn check_secret_filename(name: &str, path: &Path, out: &mut Vec<SecretFinding>) {
+    let lower = name.to_lowercase();
+    if SENSITIVE_FILENAMES
+        .iter()
+        .any(|f| lower == *f || lower.starts_with(&format!("{f}.")))
+    {
+        out.push(SecretFinding {
+            location: path.to_string_lossy().to_string(),
+            reason: "Nom de fichier sensible (identifiants/clé possible)".into(),
+        });
+        return;
+    }
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if SENSITIVE_EXTENSIONS
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(ext))
+        {
+            out.push(SecretFinding {
+                location: path.to_string_lossy().to_string(),
+                reason: "Extension de fichier sensible (certificat/clé possible)".into(),
+            });
+        }
+    }
+}
+
+fn check_secret_content(name: &str, path: &Path, out: &mut Vec<SecretFinding>) {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let is_env_like = name.to_lowercase().starts_with(".env");
+    if !is_env_like && !TEXT_SCAN_EXTENSIONS.iter().any(|e| *e == ext) {
+        return;
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return, // binaire ou illisible : on ignore silencieusement
+    };
+    for (line_no, line) in content.lines().enumerate() {
+        let lower = line.to_lowercase();
+        if let Some((_, reason)) = SECRET_PATTERNS.iter().find(|(p, _)| lower.contains(p)) {
+            out.push(SecretFinding {
+                location: format!("{} (ligne {})", path.to_string_lossy(), line_no + 1),
+                reason: reason.to_string(),
+            });
+        }
+        if out.len() >= MAX_SECRET_FINDINGS {
+            return;
+        }
+    }
+}
+
+/// Parcourt un projet une seule fois pour repérer à la fois les gros
+/// fichiers et les secrets potentiels. Ignore `.git` et les dossiers
+/// d'artefacts (`node_modules`…), qui n'ont pas d'intérêt ici.
+fn scan_project_files(
+    dir: &Path,
+    depth: usize,
+    large_out: &mut Vec<LargeFile>,
+    secret_out: &mut Vec<SecretFinding>,
+) {
+    if depth > SCAN_FILES_DEPTH
+        || (large_out.len() >= MAX_LARGE_FILES && secret_out.len() >= MAX_SECRET_FINDINGS)
+    {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if file_type.is_dir() {
+            if name.eq_ignore_ascii_case(".git") {
+                continue;
+            }
+            if CLEANABLE_DIRS.iter().any(|d| d.eq_ignore_ascii_case(&name)) {
+                continue; // dépendances/artefacts régénérables : pas d'intérêt
+            }
+            if name.starts_with('.') {
+                continue;
+            }
+            scan_project_files(&entry.path(), depth + 1, large_out, secret_out);
+            continue;
+        }
+
+        let path = entry.path();
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+
+        if size >= LARGE_FILE_THRESHOLD && large_out.len() < MAX_LARGE_FILES {
+            large_out.push(LargeFile {
+                path: path.to_string_lossy().to_string(),
+                size_bytes: size,
+            });
+        }
+
+        if secret_out.len() < MAX_SECRET_FINDINGS {
+            check_secret_filename(&name, &path, secret_out);
+            if size > 0 && size < MAX_TEXT_SCAN_SIZE {
+                check_secret_content(&name, &path, secret_out);
+            }
+        }
+    }
+}
+
+/// Analyse un projet pour repérer les gros fichiers (mauvais pour un dépôt
+/// Git) et des indices de secrets présents en clair. Ne renvoie jamais la
+/// valeur d'un secret trouvé, seulement son emplacement.
+#[tauri::command]
+fn scan_files_insight(path: String) -> FilesInsight {
+    let mut large_files = Vec::new();
+    let mut secrets = Vec::new();
+    scan_project_files(&PathBuf::from(path), 0, &mut large_files, &mut secrets);
+    large_files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    FilesInsight {
+        large_files,
+        secrets,
+    }
+}
+
+// ---------- Outils installés ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolCheck {
+    name: String,
+    installed: bool,
+    version: Option<String>,
+}
+
+fn check_tool(display_name: &str, cmd_name: &str, args: &[&str]) -> ToolCheck {
+    let mut cmd = std::process::Command::new(cmd_name);
+    cmd.args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    match cmd.output() {
+        Ok(output) if output.status.success() => {
+            let raw = String::from_utf8_lossy(&output.stdout);
+            let first_line = raw.lines().next().unwrap_or("").trim().to_string();
+            ToolCheck {
+                name: display_name.to_string(),
+                installed: true,
+                version: if first_line.is_empty() {
+                    None
+                } else {
+                    Some(first_line)
+                },
+            }
+        }
+        _ => ToolCheck {
+            name: display_name.to_string(),
+            installed: false,
+            version: None,
+        },
+    }
+}
+
+/// Vérifie la présence des outils de développement courants sur ce PC.
+#[tauri::command]
+fn check_tools() -> Vec<ToolCheck> {
+    vec![
+        check_tool("Git", "git", &["--version"]),
+        check_tool("Node.js", "node", &["--version"]),
+        check_tool("Rust (cargo)", "cargo", &["--version"]),
+        check_tool("Python", "python", &["--version"]),
+        check_tool("Docker", "docker", &["--version"]),
+        check_tool("VS Code", "code", &["--version"]),
+    ]
+}
+
+// ---------- Branches & statistiques du dépôt ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchInfo {
+    name: String,
+    is_current: bool,
+    has_upstream: bool,
+    ahead: Option<usize>,
+    behind: Option<usize>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoInsights {
+    branches: Vec<BranchInfo>,
+    total_commits: usize,
+}
+
+/// Liste les branches locales (avec leur avance/retard sur leur remote) et
+/// compte le nombre total de commits de la branche courante.
+#[tauri::command]
+fn repo_insights(path: String) -> Result<RepoInsights, String> {
+    let repo = Repository::open(&path).map_err(|e| e.message().to_string())?;
+    let current_branch = repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().map(|s| s.to_string()));
+
+    let mut branches = Vec::new();
+    if let Ok(iter) = repo.branches(Some(BranchType::Local)) {
+        for (branch, _) in iter.flatten() {
+            let name = match branch.name() {
+                Ok(Some(n)) => n.to_string(),
+                _ => continue,
+            };
+            let is_current = current_branch.as_deref() == Some(name.as_str());
+            let mut has_upstream = false;
+            let mut ahead = None;
+            let mut behind = None;
+            if let Ok(upstream) = branch.upstream() {
+                has_upstream = true;
+                if let (Some(local_oid), Some(up_oid)) =
+                    (branch.get().target(), upstream.get().target())
+                {
+                    if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
+                        ahead = Some(a);
+                        behind = Some(b);
+                    }
+                }
+            }
+            branches.push(BranchInfo {
+                name,
+                is_current,
+                has_upstream,
+                ahead,
+                behind,
+            });
+        }
+    }
+    // La branche courante en premier, puis ordre alphabétique.
+    branches.sort_by(|a, b| b.is_current.cmp(&a.is_current).then(a.name.cmp(&b.name)));
+
+    let mut total_commits = 0usize;
+    if let Ok(mut walk) = repo.revwalk() {
+        if walk.push_head().is_ok() {
+            total_commits = walk.flatten().count();
+        }
+    }
+
+    Ok(RepoInsights {
+        branches,
+        total_commits,
+    })
+}
+
+// ---------- Détail des fichiers modifiés ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileStatusEntry {
+    path: String,
+    /// "new" | "modified" | "deleted" | "renamed" | "typechange" | "conflicted"
+    status: &'static str,
+}
+
+const MAX_FILE_STATUS_ENTRIES: usize = 300;
+
+/// Liste détaillée des fichiers modifiés/nouveaux/supprimés (équivalent
+/// `git status`), pour montrer précisément ce qui n'est pas commité.
+#[tauri::command]
+fn file_status(path: String) -> Vec<FileStatusEntry> {
+    let mut out = Vec::new();
+    let repo = match Repository::open(&path) {
+        Ok(r) => r,
+        Err(_) => return out,
+    };
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .include_ignored(false)
+        .recurse_untracked_dirs(true);
+    let statuses = match repo.statuses(Some(&mut opts)) {
+        Ok(s) => s,
+        Err(_) => return out,
+    };
+    for entry in statuses.iter() {
+        if out.len() >= MAX_FILE_STATUS_ENTRIES {
+            break;
+        }
+        let file_path = match entry.path() {
+            Some(p) => p.to_string(),
+            None => continue,
+        };
+        let status = entry.status();
+        let label = if status.is_conflicted() {
+            "conflicted"
+        } else if status.is_wt_new() || status.is_index_new() {
+            "new"
+        } else if status.is_wt_deleted() || status.is_index_deleted() {
+            "deleted"
+        } else if status.is_wt_renamed() || status.is_index_renamed() {
+            "renamed"
+        } else if status.is_wt_typechange() || status.is_index_typechange() {
+            "typechange"
+        } else {
+            "modified"
+        };
+        out.push(FileStatusEntry {
+            path: file_path,
+            status: label,
+        });
+    }
+    out
+}
+
+/// Sécurise un projet avant suppression : ajoute et commite tout ce qui est
+/// en attente, puis pousse sur le remote. Un "rien à commiter" n'est pas une
+/// erreur (on passe directement au push) ; un échec du push (ex. pas de
+/// remote) est en revanche remonté tel quel.
+#[tauri::command]
+fn secure_project(path: String) -> Result<ProjectInfo, String> {
+    run_git(&path, &["add", "-A"]).map_err(|e| format!("git add a échoué : {e}"))?;
+
+    if let Err(e) = run_git(
+        &path,
+        &[
+            "commit",
+            "-m",
+            "Sécurisé automatiquement avant suppression (Dev Project Manager)",
+        ],
+    ) {
+        let lower = e.to_lowercase();
+        let nothing_to_commit = [
+            "nothing to commit",
+            "rien à valider",
+            "arbre de travail propre",
+            "working tree clean",
+        ]
+        .iter()
+        .any(|kw| lower.contains(kw));
+        if !nothing_to_commit {
+            return Err(format!("git commit a échoué : {e}"));
+        }
+    }
+
+    run_git(&path, &["push", "-u", "origin", "HEAD"])
+        .map_err(|e| format!("git push a échoué : {e}"))?;
+    Ok(inspect_repo(&PathBuf::from(&path)))
+}
+
 /// Exécute une commande `git -C <path> <args>` sans flash de console (Windows),
 /// et renvoie stdout (ou stderr) en cas de succès, l'erreur sinon.
 fn run_git(path: &str, args: &[&str]) -> Result<String, String> {
@@ -734,6 +1163,7 @@ fn recent_commits(path: String) -> Vec<CommitLog> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
@@ -752,7 +1182,12 @@ pub fn run() {
             open_url,
             recent_commits,
             scan_cleanable,
-            clean_paths
+            clean_paths,
+            scan_files_insight,
+            check_tools,
+            repo_insights,
+            file_status,
+            secure_project
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

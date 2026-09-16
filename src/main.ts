@@ -48,8 +48,63 @@ interface ProjectMeta {
   note: string;
 }
 
-type Filter = "all" | "safe" | "dirty" | "ahead" | "noremote" | "favorites" | "inactive";
-type ViewMode = "list" | "detail" | "settings";
+interface LargeFile {
+  path: string;
+  sizeBytes: number;
+}
+
+interface SecretFinding {
+  location: string;
+  reason: string;
+}
+
+interface FilesInsight {
+  largeFiles: LargeFile[];
+  secrets: SecretFinding[];
+}
+
+interface ToolCheck {
+  name: string;
+  installed: boolean;
+  version: string | null;
+}
+
+interface BranchInfo {
+  name: string;
+  isCurrent: boolean;
+  hasUpstream: boolean;
+  ahead: number | null;
+  behind: number | null;
+}
+
+interface RepoInsights {
+  branches: BranchInfo[];
+  totalCommits: number;
+}
+
+interface FileStatusEntry {
+  path: string;
+  status: "new" | "modified" | "deleted" | "renamed" | "typechange" | "conflicted";
+}
+
+interface ArchiveEntry {
+  name: string;
+  path: string;
+  remoteUrl: string | null;
+  sizeBytes: number;
+  archivedAt: number;
+}
+
+type Filter =
+  | "all"
+  | "safe"
+  | "dirty"
+  | "ahead"
+  | "noremote"
+  | "favorites"
+  | "inactive"
+  | "duplicates";
+type ViewMode = "list" | "detail" | "settings" | "archives";
 type SortBy = "name" | "size" | "commit" | "status";
 type Theme = "light" | "dark";
 
@@ -81,6 +136,13 @@ const ICONS: Record<string, string> = {
   clock: `<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>`,
   broom: `<path d="M4 20l4-4"/><path d="M13.5 6.5 21 14l-3 3-7.5-7.5"/><path d="M3 21l3-8 5 5z"/><path d="M13.5 6.5 17 3l4 4-3.5 3.5"/>`,
   tag: `<path d="M20.59 13.41 13.42 20.6a2 2 0 0 1-2.83 0L2.5 12.5V2.5h10L20.59 10.6a2 2 0 0 1 0 2.82Z"/><circle cx="7" cy="7" r="1"/>`,
+  copy: `<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>`,
+  archive: `<polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/>`,
+  lock: `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`,
+  cpu: `<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>`,
+  command: `<path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/>`,
+  fileText: `<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/>`,
+  bell: `<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>`,
 };
 
 function icon(name: string): string {
@@ -97,6 +159,8 @@ const NAV: { key: string; label: string; icon: string }[] = [
   { key: "ahead", label: "Non poussés", icon: "up" },
   { key: "noremote", label: "Sans remote", icon: "cloudoff" },
   { key: "inactive", label: "Inactifs", icon: "clock" },
+  { key: "duplicates", label: "Doublons", icon: "copy" },
+  { key: "archives", label: "Archives", icon: "archive" },
   { key: "settings", label: "Dossiers scannés", icon: "gear" },
 ];
 
@@ -107,6 +171,41 @@ function isInactive(p: ProjectInfo): boolean {
   if (p.lastCommit === null) return true;
   const days = (Date.now() / 1000 - p.lastCommit) / 86_400;
   return days > INACTIVE_DAYS;
+}
+
+// ---------- Doublons (même remote cloné à plusieurs endroits) ----------
+// Normalise une URL de remote pour comparer SSH/HTTPS/casse/.git final de
+// façon fiable (réutilise la même logique que githubWebUrl, en plus permissif).
+function normalizeRemote(url: string | null): string | null {
+  if (!url) return null;
+  let u = url.trim().toLowerCase();
+  const ssh = u.match(/^git@([^:]+):(.+)$/);
+  if (ssh) u = `${ssh[1]}/${ssh[2]}`;
+  u = u.replace(/^https?:\/\//, "").replace(/\.git$/, "");
+  return u;
+}
+
+// Regroupe les projets par remote normalisé ; ne garde que les groupes de 2+.
+function duplicateGroups(): Map<string, ProjectInfo[]> {
+  const groups = new Map<string, ProjectInfo[]>();
+  for (const p of projects) {
+    const key = normalizeRemote(p.remoteUrl);
+    if (!key) continue;
+    const arr = groups.get(key) ?? [];
+    arr.push(p);
+    groups.set(key, arr);
+  }
+  for (const [key, arr] of groups) {
+    if (arr.length < 2) groups.delete(key);
+  }
+  return groups;
+}
+
+function duplicatesOf(p: ProjectInfo): ProjectInfo[] {
+  const key = normalizeRemote(p.remoteUrl);
+  if (!key) return [];
+  const group = duplicateGroups().get(key);
+  return group ? group.filter((x) => x.path !== p.path) : [];
 }
 
 // ---------- État ----------
@@ -125,7 +224,33 @@ let theme: Theme = "light";
 const readmeCache = new Map<string, string | null>();
 const commitsCache = new Map<string, CommitLog[]>();
 const cleanableCache = new Map<string, CleanableEntry[]>();
+const insightCache = new Map<string, FilesInsight>();
+const branchesCache = new Map<string, RepoInsights>();
+const fileStatusCache = new Map<string, FileStatusEntry[]>();
 const selection = new Set<string>();
+let toolsCache: ToolCheck[] | null = null;
+
+// ---------- Archives (projets supprimés délibérément, mémoire locale) ----------
+const ARCHIVES_KEY = "dpm.archives";
+let archives: ArchiveEntry[] = [];
+
+function loadArchives(): void {
+  try {
+    const raw = localStorage.getItem(ARCHIVES_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    archives = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    archives = [];
+  }
+}
+
+function saveArchives(): void {
+  try {
+    localStorage.setItem(ARCHIVES_KEY, JSON.stringify(archives));
+  } catch {
+    /* non bloquant */
+  }
+}
 
 // ---------- Métadonnées locales (favoris, tags, notes) ----------
 // Purement côté UI : ne dépend pas du backend, persistée par chemin de projet.
@@ -323,17 +448,73 @@ function demoCall<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
     const outcomes: CleanOutcome[] = paths.map((path) => ({ path, ok: true, error: null }));
     return Promise.resolve(outcomes as unknown as T);
   }
-  if (cmd === "fetch_project" || cmd === "push_project") {
+  if (cmd === "fetch_project" || cmd === "push_project" || cmd === "secure_project") {
     const src = DEMO_PROJECTS.find((d) => d.path === args.path);
     if (!src) return Promise.resolve(undefined as unknown as T);
     const fresh: ProjectInfo = { ...src };
-    if (cmd === "push_project") {
+    if (cmd === "push_project" || cmd === "secure_project") {
       fresh.hasRemote = true;
       fresh.hasUpstream = true;
       fresh.ahead = 0;
-      fresh.safeToDelete = !fresh.isDirty;
+      if (cmd === "secure_project") {
+        fresh.isDirty = false;
+        fresh.modifiedFiles = 0;
+        fresh.untrackedFiles = 0;
+      }
+      fresh.riskLevel = fresh.isDirty || fresh.stashCount > 0 ? "attention" : "safe";
+      fresh.safeToDelete = fresh.riskLevel === "safe";
     }
     return Promise.resolve(fresh as unknown as T);
+  }
+  if (cmd === "scan_files_insight") {
+    const p = args.path as string;
+    const insight: FilesInsight =
+      p === "C:\\Users\\Corentin\\Desktop\\Dev\\dev-project-manager"
+        ? {
+            largeFiles: [{ path: `${p}\\assets\\demo-video.mp4`, sizeBytes: 42 * 1024 * 1024 }],
+            secrets: [{ location: `${p}\\.env (ligne 3)`, reason: "Clé API potentielle" }],
+          }
+        : { largeFiles: [], secrets: [] };
+    return new Promise((res) => setTimeout(() => res(insight as unknown as T), 400));
+  }
+  if (cmd === "repo_insights") {
+    const src = DEMO_PROJECTS.find((d) => d.path === args.path);
+    const insights: RepoInsights = {
+      branches: [
+        {
+          name: src?.branch ?? "main",
+          isCurrent: true,
+          hasUpstream: src?.hasUpstream ?? false,
+          ahead: src?.ahead ?? 0,
+          behind: src?.behind ?? 0,
+        },
+        { name: "feature/demo", isCurrent: false, hasUpstream: false, ahead: null, behind: null },
+      ],
+      totalCommits: 42,
+    };
+    return new Promise((res) => setTimeout(() => res(insights as unknown as T), 400));
+  }
+  if (cmd === "file_status") {
+    const src = DEMO_PROJECTS.find((d) => d.path === args.path);
+    if (!src || (!src.isDirty && src.untrackedFiles === 0)) {
+      return Promise.resolve([] as unknown as T);
+    }
+    const entries: FileStatusEntry[] = [
+      { path: "src/main.ts", status: "modified" },
+      { path: "src/new-feature.ts", status: "new" },
+    ];
+    return Promise.resolve(entries as unknown as T);
+  }
+  if (cmd === "check_tools") {
+    const tools: ToolCheck[] = [
+      { name: "Git", installed: true, version: "git version 2.51.0" },
+      { name: "Node.js", installed: true, version: "v24.11.1" },
+      { name: "Rust (cargo)", installed: true, version: "cargo 1.96.0" },
+      { name: "Python", installed: true, version: "Python 3.13.1" },
+      { name: "Docker", installed: false, version: null },
+      { name: "VS Code", installed: true, version: "1.97.0" },
+    ];
+    return new Promise((res) => setTimeout(() => res(tools as unknown as T), 400));
   }
   return Promise.resolve(undefined as unknown as T);
 }
@@ -392,15 +573,39 @@ function matchesFilter(p: ProjectInfo): boolean {
       return getMeta(p.path).favorite;
     case "inactive":
       return isInactive(p);
+    case "duplicates":
+      return duplicatesOf(p).length > 0;
     default:
       return true;
   }
 }
 
+// Recherche : par défaut sur nom/chemin/branche/stack/tags/note. Préfixes
+// dédiés pour cibler un seul champ : tag:, stack:, note:.
 function matchesSearch(p: ProjectInfo): boolean {
   if (!search) return true;
-  const q = search.toLowerCase();
-  return p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q);
+  const q = search.trim().toLowerCase();
+  const meta = getMeta(p.path);
+
+  const prefixed = q.match(/^(tag|stack|note):(.*)$/);
+  if (prefixed) {
+    const [, field, value] = prefixed;
+    const needle = value.trim();
+    if (!needle) return true;
+    if (field === "tag") return meta.tags.some((t) => t.toLowerCase().includes(needle));
+    if (field === "stack") return p.stack.some((s) => s.toLowerCase().includes(needle));
+    if (field === "note") return meta.note.toLowerCase().includes(needle);
+  }
+
+  return (
+    p.name.toLowerCase().includes(q) ||
+    p.path.toLowerCase().includes(q) ||
+    (p.branch ?? "").toLowerCase().includes(q) ||
+    p.stack.some((s) => s.toLowerCase().includes(q)) ||
+    meta.tags.some((t) => t.toLowerCase().includes(q)) ||
+    meta.note.toLowerCase().includes(q) ||
+    (p.remoteUrl ?? "").toLowerCase().includes(q)
+  );
 }
 
 function filtered(): ProjectInfo[] {
@@ -462,6 +667,10 @@ function countFor(key: string): number {
       return projects.filter((p) => getMeta(p.path).favorite).length;
     case "inactive":
       return projects.filter(isInactive).length;
+    case "duplicates":
+      return projects.filter((p) => duplicatesOf(p).length > 0).length;
+    case "archives":
+      return archives.length;
     default:
       return projects.length;
   }
@@ -521,6 +730,16 @@ function statusBadges(p: ProjectInfo, compact = false): string {
         "neutral",
         "Inactif",
         `Aucun commit depuis plus de ${INACTIVE_DAYS} jours.`,
+      ),
+    );
+  }
+  const dups = duplicatesOf(p);
+  if (dups.length > 0) {
+    b.push(
+      badge(
+        "neutral",
+        `Cloné ×${dups.length + 1}`,
+        `Le même remote existe aussi dans : ${dups.map((d) => d.path).join(" · ")}`,
       ),
     );
   }
@@ -605,6 +824,8 @@ function currentTitle(): string {
       return "Favoris";
     case "inactive":
       return "Projets inactifs";
+    case "duplicates":
+      return "Doublons";
     default:
       return "Vue d'ensemble";
   }
@@ -624,6 +845,8 @@ function currentSubtitle(): string {
       return "Les projets que tu as marqués d'une étoile.";
     case "inactive":
       return `Aucun commit depuis plus de ${INACTIVE_DAYS} jours — candidats au grand ménage.`;
+    case "duplicates":
+      return "Le même remote existe dans plusieurs dossiers sur ce PC.";
     default:
       return "Tous les projets Git détectés dans tes dossiers.";
   }
@@ -632,12 +855,10 @@ function currentSubtitle(): string {
 // ---------- Rendu : sidebar ----------
 function renderNav(): void {
   const nav = $("#nav");
-  const activeKey = viewMode === "settings" ? "settings" : filter;
+  const activeKey = viewMode === "settings" || viewMode === "archives" ? viewMode : filter;
   nav.innerHTML = NAV.map((item) => {
-    const count =
-      scanned && item.key !== "settings"
-        ? `<span class="nav-count">${countFor(item.key)}</span>`
-        : "";
+    const showCount = item.key === "archives" ? true : item.key !== "settings" && scanned;
+    const count = showCount ? `<span class="nav-count">${countFor(item.key)}</span>` : "";
     return `<button class="nav-item ${
       item.key === activeKey ? "is-active" : ""
     }" data-key="${item.key}">${icon(item.icon)}<span>${item.label}</span>${count}</button>`;
@@ -767,6 +988,9 @@ function renderList(): void {
       <div class="panel-head">
         <h2>${visible.length} projet${visible.length > 1 ? "s" : ""}</h2>
         <div class="panel-head-right">
+          <button class="btn btn-sm btn-ghost" data-action="sync-all" title="Fetch sur tous les projets avec remote">${icon(
+            "refresh",
+          )} Tout synchroniser</button>
           <button class="btn btn-sm btn-ghost" data-action="select-all">Tout sélectionner</button>
           <select id="sort-select" class="sort-select">
             <option value="name"${sortBy === "name" ? " selected" : ""}>Trier : Nom</option>
@@ -793,7 +1017,22 @@ function renderDetail(p: ProjectInfo): void {
     : `<div class="safe-box no">${icon("alert")}<div><strong>Pas entièrement sauvegardé</strong>
         <ul class="reason-list">${reasons.map((r) => `<li>${esc(r)}</li>`).join("") || "<li>État inconnu</li>"}</ul>
         <p class="reason-note">La suppression reste possible, mais ces éléments locaux seront perdus (récupérables dans la corbeille).</p>
+        ${
+          p.hasRemote
+            ? `<button class="btn btn-sm secure-btn" data-action="secure" data-path="${esc(
+                p.path,
+              )}">${icon("lock")} Sécuriser (commit + push)</button>`
+            : ""
+        }
       </div></div>`;
+
+  const dups = duplicatesOf(p);
+  const dupBox = dups.length
+    ? `<div class="safe-box no dup-box">${icon("copy")}<div><strong>Cloné à plusieurs endroits</strong>
+        Le même remote existe aussi dans :
+        <ul class="reason-list">${dups.map((d) => `<li><code>${esc(d.path)}</code></li>`).join("")}</ul>
+      </div></div>`
+    : "";
 
   const tagsHtml = meta.tags
     .map(
@@ -849,6 +1088,7 @@ function renderDetail(p: ProjectInfo): void {
       <div class="row-badges">${statusBadges(p)}</div>
     </div>
     ${safeBox}
+    ${dupBox}
     <div class="info-grid">${cellsHtml}${sizeCell}</div>
 
     <div class="meta-block">
@@ -887,6 +1127,16 @@ function renderDetail(p: ProjectInfo): void {
       </div>
     </div>
 
+    <div class="deep-block">
+      <div class="k">🧪 Analyse approfondie</div>
+      <div id="deep-section">
+        <p class="clean-hint">Santé du dépôt, branches, fichiers modifiés, gros fichiers et secrets potentiels.</p>
+        <button class="btn btn-sm" data-action="deep-analysis" data-path="${esc(
+          p.path,
+        )}">Lancer l'analyse</button>
+      </div>
+    </div>
+
     <div class="detail-actions">
       <button class="btn" data-action="editor" data-path="${esc(p.path)}">${icon(
         "code",
@@ -918,6 +1168,15 @@ function renderDetail(p: ProjectInfo): void {
       <button class="btn" data-action="pull" data-path="${esc(p.path)}" ${
         p.hasUpstream ? "" : "disabled"
       }>${icon("pull")} Pull</button>
+      ${
+        p.hasRemote
+          ? `<button class="btn" data-action="archive" data-path="${esc(
+              p.path,
+            )}" title="Supprimer en gardant un souvenir (lien GitHub, taille, date)">${icon(
+              "archive",
+            )} Archiver</button>`
+          : ""
+      }
       <button class="btn btn-danger" data-action="delete" data-path="${esc(
         p.path,
       )}" title="Envoyer à la corbeille (local uniquement)">${icon("trash")} Supprimer</button>
@@ -953,6 +1212,80 @@ function renderSettings(): void {
     }
     input.value = "";
   });
+
+  view.insertAdjacentHTML(
+    "beforeend",
+    `<div class="panel" style="padding:20px; margin-top:16px">
+      <div class="panel-head-inline"><h2>${icon("cpu")} Environnement</h2></div>
+      <p class="clean-hint">Outils de développement détectés sur ce PC.</p>
+      <div id="tools-section">
+        <button class="btn btn-sm" data-action="check-tools">Vérifier les outils installés</button>
+      </div>
+    </div>`,
+  );
+  if (toolsCache) renderToolsSection();
+}
+
+function renderToolsSection(): void {
+  const section = document.getElementById("tools-section");
+  if (!section || !toolsCache) return;
+  section.innerHTML = `<div class="tools-grid">${toolsCache
+    .map(
+      (t) =>
+        `<div class="tool-row ${t.installed ? "ok" : "missing"}">
+          <span class="tool-dot"></span>
+          <span class="tool-name">${esc(t.name)}</span>
+          <span class="tool-version">${esc(t.version ?? (t.installed ? "" : "absent"))}</span>
+        </div>`,
+    )
+    .join("")}</div>`;
+}
+
+// ---------- Archives ----------
+function renderArchives(): void {
+  const view = $("#view");
+  if (archives.length === 0) {
+    view.innerHTML = `
+      ${pageHead("Archives", "Historique des projets supprimés délibérément depuis l'app.")}
+      <div class="state">
+        <div class="state-icon">${icon("archive")}</div>
+        <h2>Aucune archive</h2>
+        <p>Quand tu archives un projet (au lieu de le supprimer simplement), il apparaît ici avec un lien vers son remote.</p>
+      </div>`;
+    return;
+  }
+  const sorted = [...archives].sort((a, b) => b.archivedAt - a.archivedAt);
+  const rows = sorted
+    .map((a) => {
+      const url = githubWebUrl(a.remoteUrl);
+      return `<div class="archive-row">
+        <div class="archive-avatar">${icon("archive")}</div>
+        <div class="archive-main">
+          <div class="archive-name">${esc(a.name)}</div>
+          <div class="archive-path" title="${esc(a.path)}">${esc(a.path)}</div>
+        </div>
+        <div class="archive-meta">
+          <div>${formatBytes(a.sizeBytes)} libérés</div>
+          <div>${esc(formatRelative(Math.floor(a.archivedAt / 1000)))}</div>
+        </div>
+        <div class="archive-actions">
+          ${
+            url
+              ? `<button class="btn btn-sm" data-action="archive-open" data-url="${esc(
+                  url,
+                )}">${icon("branch")} GitHub</button>`
+              : ""
+          }
+          <button class="btn btn-sm btn-ghost" data-action="archive-remove" data-archive-path="${esc(
+            a.path,
+          )}" title="Retirer de la liste">${icon("trash")}</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+  view.innerHTML = `
+    ${pageHead("Archives", "Historique des projets supprimés délibérément depuis l'app.")}
+    <div class="panel"><div class="archive-list">${rows}</div></div>`;
 }
 
 function renderWelcome(): void {
@@ -976,6 +1309,10 @@ function render(): void {
   renderSideCard();
   if (viewMode === "settings") {
     renderSettings();
+    return;
+  }
+  if (viewMode === "archives") {
+    renderArchives();
     return;
   }
   if (!scanned) {
@@ -1053,7 +1390,10 @@ function setScanBusy(busy: boolean): void {
   if (refresh) refresh.classList.toggle("is-loading", busy);
 }
 
-async function scan(): Promise<void> {
+// `manual` distingue un clic utilisateur (déclenche une notification résumé
+// en fin de scan) du scan automatique au démarrage (silencieux, pour ne pas
+// spammer l'utilisateur à chaque lancement de l'app).
+async function scan(manual = false): Promise<void> {
   if (roots.length === 0) {
     toast("info", "Aucun dossier", "Ajoute un dossier dans « Dossiers scannés ».");
     viewMode = "settings";
@@ -1078,6 +1418,7 @@ async function scan(): Promise<void> {
     setScanBusy(false);
     render();
     fetchSizes(token);
+    if (manual) notifyScanSummary();
   } catch (e) {
     if (token !== scanToken) return;
     loading = false;
@@ -1357,6 +1698,347 @@ async function doCleanSelected(path: string): Promise<void> {
   }
 }
 
+// ---------- Sécuriser avant suppression (commit + push automatique) ----------
+async function doSecureProject(p: ProjectInfo): Promise<void> {
+  toast("info", `Sécurisation de ${p.name}…`);
+  try {
+    const fresh = await call<ProjectInfo>("secure_project", { path: p.path });
+    mergeProject(fresh);
+    render();
+    toast(
+      fresh.safeToDelete ? "ok" : "info",
+      fresh.safeToDelete
+        ? `${p.name} est maintenant entièrement sauvegardé`
+        : `${p.name} : commit + push effectués, vérifie l'état restant`,
+    );
+  } catch (e) {
+    toast("err", `Sécurisation impossible — ${p.name}`, String(e));
+  }
+}
+
+// ---------- Archiver (supprimer en gardant un souvenir) ----------
+function doArchiveProject(p: ProjectInfo): void {
+  const modal = $("#modal");
+  $("#modal-body").innerHTML = `Le projet <strong>${esc(
+    p.name,
+  )}</strong> sera déplacé vers la corbeille, et une entrée sera gardée dans <strong>Archives</strong> avec un lien vers son remote pour le retrouver facilement.`;
+  const confirmBtn = $<HTMLButtonElement>("#modal-confirm");
+  const cancelBtn = $<HTMLButtonElement>("#modal-cancel");
+  modal.hidden = false;
+  const close = () => {
+    modal.hidden = true;
+    confirmBtn.onclick = null;
+    cancelBtn.onclick = null;
+  };
+  cancelBtn.onclick = close;
+  confirmBtn.onclick = async () => {
+    close();
+    try {
+      await call("delete_project", { path: p.path });
+    } catch (e) {
+      toast("err", `Archivage impossible — ${p.name}`, String(e));
+      return;
+    }
+    archives.push({
+      name: p.name,
+      path: p.path,
+      remoteUrl: p.remoteUrl,
+      sizeBytes: p.sizeBytes ?? 0,
+      archivedAt: Date.now(),
+    });
+    saveArchives();
+    toast("ok", `${p.name} archivé`, "Retrouve-le dans Archives.");
+    performDeleteFollowUp(p);
+  };
+}
+
+// Partie commune à la suppression normale et à l'archivage : retire le
+// projet de la liste avec l'animation adaptée à la vue courante.
+function performDeleteFollowUp(p: ProjectInfo): void {
+  const row =
+    viewMode === "list"
+      ? document.querySelector<HTMLElement>(`.row[data-path="${cssEscape(p.path)}"]`)
+      : null;
+  if (row) {
+    row.classList.add("row--removing");
+    window.setTimeout(() => {
+      projects = projects.filter((x) => x.path !== p.path);
+      render();
+    }, 260);
+  } else {
+    projects = projects.filter((x) => x.path !== p.path);
+    if (viewMode === "detail") viewMode = "list";
+    render();
+  }
+}
+
+function doRemoveArchive(path: string): void {
+  archives = archives.filter((a) => a.path !== path);
+  saveArchives();
+  render();
+}
+
+// ---------- Outils installés ----------
+async function doCheckTools(): Promise<void> {
+  const section = document.getElementById("tools-section");
+  if (section) {
+    section.innerHTML = `<div class="clean-loading"><span class="spinner spinner-sm"></span>Vérification en cours…</div>`;
+  }
+  try {
+    toolsCache = await call<ToolCheck[]>("check_tools");
+    renderToolsSection();
+  } catch (e) {
+    if (section) section.innerHTML = `<p class="clean-empty">Vérification impossible : ${esc(String(e))}</p>`;
+  }
+}
+
+// ---------- Analyse approfondie (santé, branches, fichiers, secrets) ----------
+async function doDeepAnalysis(path: string): Promise<void> {
+  const section = document.getElementById("deep-section");
+  if (section) {
+    section.innerHTML = `<div class="clean-loading"><span class="spinner spinner-sm"></span>Analyse en cours…</div>`;
+  }
+  try {
+    const [insights, files, statuses] = await Promise.all([
+      call<RepoInsights>("repo_insights", { path }),
+      call<FilesInsight>("scan_files_insight", { path }),
+      call<FileStatusEntry[]>("file_status", { path }),
+    ]);
+    branchesCache.set(path, insights);
+    insightCache.set(path, files);
+    fileStatusCache.set(path, statuses);
+    if (selectedPath === path) renderDeepSection(path);
+  } catch (e) {
+    if (section) section.innerHTML = `<p class="clean-empty">Analyse impossible : ${esc(String(e))}</p>`;
+  }
+}
+
+function healthChecklist(
+  p: ProjectInfo,
+  files: FilesInsight | undefined,
+): { ok: boolean; label: string }[] {
+  const items: { ok: boolean; label: string }[] = [
+    { ok: p.hasRemote, label: "Remote distant configuré" },
+    { ok: p.hasUpstream, label: "Branche suivie par un remote" },
+    { ok: !p.isDirty, label: "Aucune modification non commitée" },
+    { ok: (p.ahead ?? 0) === 0, label: "Aucun commit en attente de push" },
+    { ok: (p.behind ?? 0) === 0, label: "À jour avec le remote (pas de pull en attente)" },
+    { ok: p.stashCount === 0, label: "Aucun stash oublié" },
+    { ok: !p.error, label: "Dépôt Git lisible sans erreur" },
+  ];
+  if (files) {
+    items.push({ ok: files.largeFiles.length === 0, label: "Pas de gros fichier (> 20 Mo)" });
+    items.push({ ok: files.secrets.length === 0, label: "Aucun secret potentiel détecté" });
+  }
+  return items;
+}
+
+function renderDeepSection(path: string): void {
+  const section = document.getElementById("deep-section");
+  if (!section) return;
+  const p = projectByPath(path);
+  if (!p) return;
+  const insights = branchesCache.get(path);
+  const files = insightCache.get(path);
+  const statuses = fileStatusCache.get(path) ?? [];
+
+  const checklist = healthChecklist(p, files);
+  const checklistHtml = checklist
+    .map(
+      (i) =>
+        `<div class="health-row ${i.ok ? "ok" : "no"}">${icon(i.ok ? "check" : "alert")}<span>${esc(
+          i.label,
+        )}</span></div>`,
+    )
+    .join("");
+
+  const branchesHtml = insights
+    ? `<div class="sub-k">Branches (${insights.totalCommits} commits sur la branche courante)</div>
+       <div class="branch-list">${insights.branches
+         .map((b) => {
+           const parts: string[] = [];
+           if (b.isCurrent) parts.push(`<span class="badge neutral">courante</span>`);
+           if (!b.hasUpstream) parts.push(`<span class="badge amber">sans remote</span>`);
+           else {
+             if ((b.ahead ?? 0) > 0) parts.push(`<span class="badge amber">${b.ahead} non poussé(s)</span>`);
+             if ((b.behind ?? 0) > 0) parts.push(`<span class="badge neutral">${b.behind} en retard</span>`);
+             if ((b.ahead ?? 0) === 0 && (b.behind ?? 0) === 0) parts.push(`<span class="badge green">à jour</span>`);
+           }
+           return `<div class="branch-row"><code>${esc(b.name)}</code><div class="branch-badges">${parts.join("")}</div></div>`;
+         })
+         .join("")}</div>`
+    : "";
+
+  const statusLabels: Record<FileStatusEntry["status"], string> = {
+    new: "A",
+    modified: "M",
+    deleted: "D",
+    renamed: "R",
+    typechange: "T",
+    conflicted: "!",
+  };
+  const filesHtml = statuses.length
+    ? `<div class="sub-k">Fichiers modifiés (${statuses.length})</div>
+       <div class="file-status-list">${statuses
+         .slice(0, 50)
+         .map(
+           (f) =>
+             `<div class="file-status-row"><span class="fs-badge fs-${f.status}">${statusLabels[f.status]}</span><span class="fs-path">${esc(f.path)}</span></div>`,
+         )
+         .join("")}${statuses.length > 50 ? `<div class="file-status-more">… et ${statuses.length - 50} de plus</div>` : ""}</div>`
+    : "";
+
+  const largeHtml = files && files.largeFiles.length
+    ? `<div class="sub-k">⚠️ Gros fichiers</div>
+       <div class="large-list">${files.largeFiles
+         .map((f) => `<div class="large-row"><span class="fs-path">${esc(f.path)}</span><span>${formatBytes(f.sizeBytes)}</span></div>`)
+         .join("")}</div>`
+    : "";
+
+  const secretsHtml = files && files.secrets.length
+    ? `<div class="sub-k">🔑 Secrets potentiels</div>
+       <div class="secret-warning">La valeur n'est jamais lue ni affichée — seul l'emplacement est indiqué. Vérifie chaque ligne manuellement.</div>
+       <div class="secret-list">${files.secrets
+         .map((s) => `<div class="secret-row"><span class="fs-path">${esc(s.location)}</span><span>${esc(s.reason)}</span></div>`)
+         .join("")}</div>`
+    : "";
+
+  section.innerHTML = `
+    <div class="health-list">${checklistHtml}</div>
+    ${branchesHtml}
+    ${filesHtml}
+    ${largeHtml}
+    ${secretsHtml}
+  `;
+}
+
+// ---------- Palette de commandes (Ctrl+K) ----------
+interface PaletteCommand {
+  label: string;
+  hint?: string;
+  icon: string;
+  run: () => void;
+}
+
+function paletteCommands(): PaletteCommand[] {
+  const actionCmds: PaletteCommand[] = [
+    {
+      label: scanned ? "Rescanner mes projets" : "Scanner mes projets",
+      icon: "search",
+      run: () => scan(true),
+    },
+    {
+      label: "Basculer le thème clair/sombre",
+      icon: "moon",
+      run: () => applyTheme(theme === "dark" ? "light" : "dark"),
+    },
+    { label: "Tout synchroniser (fetch)", icon: "refresh", run: () => doSyncAll() },
+    { label: "Tout sélectionner (vue courante)", icon: "check", run: () => selectAllVisible() },
+  ];
+  const navCmds: PaletteCommand[] = NAV.map((item) => ({
+    label: `Aller à : ${item.label}`,
+    icon: item.icon,
+    run: () => {
+      if (item.key === "settings" || item.key === "archives") {
+        viewMode = item.key as ViewMode;
+      } else {
+        viewMode = "list";
+        filter = item.key as Filter;
+      }
+      render();
+    },
+  }));
+  const projectCmds: PaletteCommand[] = projects.map((p) => ({
+    label: p.name,
+    hint: p.path,
+    icon: "folder",
+    run: () => openDetail(p.path),
+  }));
+  return [...actionCmds, ...navCmds, ...projectCmds];
+}
+
+let paletteResults: PaletteCommand[] = [];
+let paletteIndex = 0;
+
+function openPalette(): void {
+  const overlay = document.getElementById("palette");
+  const input = $<HTMLInputElement>("#palette-input");
+  if (!overlay) return;
+  overlay.hidden = false;
+  input.value = "";
+  paletteIndex = 0;
+  renderPaletteList("");
+  input.focus();
+}
+
+function closePalette(): void {
+  const overlay = document.getElementById("palette");
+  if (overlay) overlay.hidden = true;
+}
+
+function renderPaletteList(query: string): void {
+  const list = document.getElementById("palette-list");
+  if (!list) return;
+  const q = query.trim().toLowerCase();
+  paletteResults = paletteCommands()
+    .filter((c) => !q || c.label.toLowerCase().includes(q) || (c.hint ?? "").toLowerCase().includes(q))
+    .slice(0, 40);
+  if (paletteIndex >= paletteResults.length) paletteIndex = 0;
+  list.innerHTML = paletteResults.length
+    ? paletteResults
+        .map(
+          (c, i) =>
+            `<div class="palette-item ${i === paletteIndex ? "is-active" : ""}" data-index="${i}">${icon(
+              c.icon,
+            )}<span class="palette-label">${esc(c.label)}</span>${
+              c.hint ? `<span class="palette-hint">${esc(c.hint)}</span>` : ""
+            }</div>`,
+        )
+        .join("")
+    : `<div class="palette-empty">Aucun résultat.</div>`;
+}
+
+function movePaletteSelection(delta: number): void {
+  if (paletteResults.length === 0) return;
+  paletteIndex = (paletteIndex + delta + paletteResults.length) % paletteResults.length;
+  renderPaletteList($<HTMLInputElement>("#palette-input").value);
+}
+
+function runPaletteSelection(index: number): void {
+  const cmd = paletteResults[index];
+  if (!cmd) return;
+  closePalette();
+  cmd.run();
+}
+
+// ---------- Synchronisation globale ----------
+async function doSyncAll(): Promise<void> {
+  const targets = projects.filter((p) => p.hasRemote);
+  if (targets.length === 0) {
+    toast("info", "Synchronisation", "Aucun projet avec remote à synchroniser.");
+    return;
+  }
+  toast("info", `Synchronisation de ${targets.length} projet(s)…`);
+  let upToDate = 0;
+  let behindCount = 0;
+  let fail = 0;
+  for (const t of targets) {
+    try {
+      const fresh = await call<ProjectInfo>("fetch_project", { path: t.path });
+      mergeProject(fresh);
+      if ((fresh.behind ?? 0) > 0) behindCount++;
+      else upToDate++;
+    } catch {
+      fail++;
+    }
+  }
+  render();
+  toast(
+    fail ? "err" : "ok",
+    `Synchronisation terminée : ${upToDate} à jour, ${behindCount} en retard${fail ? `, ${fail} échec(s)` : ""}`,
+  );
+}
+
 // ---------- Graphique donut (espace disque) ----------
 function chartBody(): string {
   const total = projects.reduce((a, p) => a + (p.sizeBytes ?? 0), 0);
@@ -1556,23 +2238,7 @@ async function performDelete(p: ProjectInfo): Promise<void> {
     return;
   }
   toast("ok", `${p.name} envoyé à la corbeille`);
-
-  const row =
-    viewMode === "list"
-      ? document.querySelector<HTMLElement>(`.row[data-path="${cssEscape(p.path)}"]`)
-      : null;
-
-  if (row) {
-    row.classList.add("row--removing");
-    window.setTimeout(() => {
-      projects = projects.filter((x) => x.path !== p.path);
-      render();
-    }, 260);
-  } else {
-    projects = projects.filter((x) => x.path !== p.path);
-    if (viewMode === "detail") viewMode = "list";
-    render();
-  }
+  performDeleteFollowUp(p);
 }
 
 function openDetail(path: string): void {
@@ -1643,6 +2309,15 @@ function onAction(btn: HTMLElement): void {
     if (path) doCleanSelected(path);
     return;
   }
+  if (action === "deep-analysis") {
+    const path = btn.dataset.path;
+    if (path) doDeepAnalysis(path);
+    return;
+  }
+  if (action === "check-tools") {
+    doCheckTools();
+    return;
+  }
   if (action === "scan") {
     scan();
     return;
@@ -1667,6 +2342,24 @@ function onAction(btn: HTMLElement): void {
     bulkDelete();
     return;
   }
+  if (action === "sync-all") {
+    doSyncAll();
+    return;
+  }
+  if (action === "open-palette") {
+    openPalette();
+    return;
+  }
+  if (action === "archive-open") {
+    const url = btn.dataset.url;
+    if (url) call("open_url", { url }).catch((e) => toast("err", "Ouverture du remote", String(e)));
+    return;
+  }
+  if (action === "archive-remove") {
+    const p = btn.dataset.archivePath;
+    if (p) doRemoveArchive(p);
+    return;
+  }
   if (action === "remove-root") {
     const root = btn.dataset.root;
     if (root) {
@@ -1686,6 +2379,8 @@ function onAction(btn: HTMLElement): void {
   else if (action === "fetch") doFetch(p);
   else if (action === "push") doPush(p);
   else if (action === "remote") doOpenRemote(p);
+  else if (action === "secure") doSecureProject(p);
+  else if (action === "archive") doArchiveProject(p);
   else if (action === "delete") askDelete(p);
 }
 
@@ -1711,6 +2406,32 @@ function initTheme(): void {
     /* non bloquant */
   }
   applyTheme(saved);
+}
+
+// ---------- Notifications Windows ----------
+// Résumé envoyé uniquement après un scan déclenché manuellement (pas au
+// lancement automatique de l'app, pour ne pas être intrusif à chaque ouverture).
+async function notifyScanSummary(): Promise<void> {
+  if (!IN_TAURI || projects.length === 0) return;
+  try {
+    const { isPermissionGranted, requestPermission, sendNotification } = await import(
+      "@tauri-apps/plugin-notification"
+    );
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      granted = (await requestPermission()) === "granted";
+    }
+    if (!granted) return;
+    const critical = projects.filter((p) => p.riskLevel === "critical").length;
+    const safe = projects.filter((p) => p.safeToDelete).length;
+    const body =
+      critical > 0
+        ? `⚠️ ${critical} projet(s) non sauvegardé(s) du tout. ${safe} supprimable(s) en sécurité.`
+        : `${projects.length} projet(s) analysé(s) — ${safe} supprimable(s) en sécurité.`;
+    sendNotification({ title: "Dev Project Manager", body });
+  } catch {
+    // Notifications indisponibles (permission refusée, plateforme…) : silencieux.
+  }
 }
 
 // ---------- Mises à jour ----------
@@ -1780,7 +2501,9 @@ async function init(): Promise<void> {
     "search",
   )}<input id="search" type="search" placeholder="Rechercher un projet…" autocomplete="off" />`;
   $("#refresh-btn").innerHTML = icon("refresh");
+  $("#palette-btn").innerHTML = icon("command");
   loadMeta();
+  loadArchives();
   initTheme();
   $("#theme-btn").addEventListener("click", () =>
     applyTheme(theme === "dark" ? "light" : "dark"),
@@ -1798,8 +2521,8 @@ async function init(): Promise<void> {
     saveRoots();
   }
 
-  $("#scan-btn").addEventListener("click", scan);
-  $("#refresh-btn").addEventListener("click", scan);
+  $("#scan-btn").addEventListener("click", () => scan(true));
+  $("#refresh-btn").addEventListener("click", () => scan(true));
 
   // Projets renvoyés en flux par le backend pendant un scan : on les ajoute
   // au fur et à mesure au lieu d'attendre la fin complète du scan.
@@ -1822,8 +2545,8 @@ async function init(): Promise<void> {
     const btn = (e.target as HTMLElement).closest<HTMLElement>(".nav-item");
     if (!btn || !btn.dataset.key) return;
     const key = btn.dataset.key;
-    if (key === "settings") {
-      viewMode = "settings";
+    if (key === "settings" || key === "archives") {
+      viewMode = key as ViewMode;
     } else {
       viewMode = "list";
       filter = key as Filter;
@@ -1897,9 +2620,48 @@ async function init(): Promise<void> {
   });
   checkForUpdate();
 
-  // Détection automatique au démarrage si des dossiers sont déjà connus.
+  // Palette de commandes (Ctrl+K / Cmd+K pour ouvrir, Echap pour fermer).
+  $("#palette-btn").addEventListener("click", openPalette);
+  window.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      const overlay = document.getElementById("palette");
+      if (overlay?.hidden === false) closePalette();
+      else openPalette();
+      return;
+    }
+    if (e.key === "Escape") {
+      const overlay = document.getElementById("palette");
+      if (overlay && !overlay.hidden) closePalette();
+    }
+  });
+  $("#palette").addEventListener("click", (e) => {
+    if (e.target === document.getElementById("palette")) closePalette();
+  });
+  $("#palette-input").addEventListener("input", (e) => {
+    renderPaletteList((e.target as HTMLInputElement).value);
+  });
+  $("#palette-input").addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      movePaletteSelection(1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      movePaletteSelection(-1);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      runPaletteSelection(paletteIndex);
+    }
+  });
+  $("#palette-list").addEventListener("click", (e) => {
+    const item = (e.target as HTMLElement).closest<HTMLElement>(".palette-item");
+    if (item?.dataset.index) runPaletteSelection(Number(item.dataset.index));
+  });
+
+  // Détection automatique au démarrage si des dossiers sont déjà connus
+  // (silencieuse : pas de notification, contrairement à un scan manuel).
   if (roots.length > 0) {
-    scan();
+    scan(false);
   } else {
     render();
   }
