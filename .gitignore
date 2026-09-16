@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Maquettes du companion visuel de brainstorming (Claude)
+.superpowers/

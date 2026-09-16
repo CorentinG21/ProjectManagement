@@ -7,7 +7,7 @@
 // sauvegardé sur son remote.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 use git2::{BranchType, Repository, StatusOptions};
 use serde::Serialize;
@@ -289,23 +289,22 @@ fn dedupe_roots(roots: Vec<String>) -> Vec<PathBuf> {
     kept.into_iter().map(|(original, _)| original).collect()
 }
 
-/// Parcours récursif d'un dossier. S'arrête dès qu'un dépôt Git est trouvé
-/// (on ne descend jamais dans un projet), et ignore les dossiers lourds/cachés.
-/// Au premier niveau sous chaque racine, les sous-dossiers sont explorés en
-/// parallèle (un thread par sous-dossier) pour accélérer les scans sur de
-/// gros disques. Chaque projet trouvé est envoyé immédiatement au frontend
-/// via un évènement, en plus d'être accumulé dans `results`.
-fn scan_dir(dir: &Path, depth: usize, app: &AppHandle, results: &Arc<Mutex<Vec<ProjectInfo>>>) {
+/// Parcours récursif d'un dossier à la recherche de dépôts Git : s'arrête dès
+/// qu'il en trouve un (on ne descend jamais dans un projet) et ignore les
+/// dossiers lourds/cachés. Chaque dépôt trouvé est envoyé immédiatement dans
+/// `tx` — il part à l'inspection tout de suite, sans attendre que le reste du
+/// disque ait fini d'être exploré (voir `scan_projects`). Au premier niveau
+/// sous chaque racine, les sous-dossiers sont explorés en parallèle (un
+/// thread par sous-dossier) pour accélérer la découverte sur de gros disques.
+fn find_repo_dirs(dir: &Path, depth: usize, tx: &mpsc::Sender<PathBuf>) {
     if depth > MAX_DEPTH {
         return;
     }
 
     // Un dossier contenant ".git" (dossier ou fichier pour les worktrees) est
-    // un projet : on l'inspecte et on ne descend pas plus loin.
+    // un projet : on le transmet et on ne descend pas plus loin.
     if dir.join(".git").exists() {
-        let info = inspect_repo(dir);
-        let _ = app.emit("project-found", &info);
-        results.lock().unwrap().push(info);
+        let _ = tx.send(dir.to_path_buf());
         return;
     }
 
@@ -336,34 +335,69 @@ fn scan_dir(dir: &Path, depth: usize, app: &AppHandle, results: &Arc<Mutex<Vec<P
     if depth == 0 {
         std::thread::scope(|scope| {
             for sub in &subdirs {
-                scope.spawn(move || scan_dir(sub, depth + 1, app, results));
+                let tx = tx.clone();
+                scope.spawn(move || find_repo_dirs(sub, depth + 1, &tx));
             }
         });
     } else {
         for sub in &subdirs {
-            scan_dir(sub, depth + 1, app, results);
+            find_repo_dirs(sub, depth + 1, tx);
         }
     }
 }
 
 /// Scanne une liste de dossiers racines et renvoie les projets trouvés,
 /// triés par nom (insensible à la casse). Les racines redondantes sont
-/// éliminées avant le scan, et chaque racine restante est scannée dans son
-/// propre thread pour paralléliser le travail disque.
+/// éliminées avant le scan.
+///
+/// Découverte et inspection tournent en continu, pas en deux passes
+/// séquentielles : des threads "producteurs" parcourent les racines et
+/// déposent chaque dépôt trouvé dans un canal dès qu'ils tombent dessus,
+/// pendant qu'un pool de threads "consommateurs" (borné au nombre de cœurs)
+/// les inspecte au fil de l'eau — un gros dépôt (long `git status`) ne fait
+/// donc pas attendre les autres, et les résultats commencent à s'afficher
+/// côté frontend dès le premier trouvé plutôt qu'après tout le scan.
 #[tauri::command]
 fn scan_projects(app: AppHandle, roots: Vec<String>) -> Vec<ProjectInfo> {
     let roots = dedupe_roots(roots);
+    let (tx, rx) = mpsc::channel::<PathBuf>();
+    let rx = Arc::new(Mutex::new(rx));
     let results: Arc<Mutex<Vec<ProjectInfo>>> = Arc::new(Mutex::new(Vec::new()));
+    let worker_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
 
     std::thread::scope(|scope| {
+        // Consommateurs : inspectent chaque dépôt dès qu'il arrive dans le
+        // canal. Ils s'arrêtent quand le canal est fermé (plus aucun
+        // producteur actif) et vide.
+        for _ in 0..worker_count {
+            let rx = Arc::clone(&rx);
+            let results = Arc::clone(&results);
+            let app = app.clone();
+            scope.spawn(move || loop {
+                let received = rx.lock().unwrap().recv();
+                let Ok(dir) = received else {
+                    break;
+                };
+                let info = inspect_repo(&dir);
+                let _ = app.emit("project-found", &info);
+                results.lock().unwrap().push(info);
+            });
+        }
+
+        // Producteurs : parcourent les racines en parallèle.
         for root in &roots {
             if !root.is_dir() {
                 continue;
             }
-            let results = Arc::clone(&results);
-            let app = app.clone();
-            scope.spawn(move || scan_dir(root, 0, &app, &results));
+            let tx = tx.clone();
+            scope.spawn(move || find_repo_dirs(root, 0, &tx));
         }
+        // Sans ce drop, ce `tx` (celui de scan_projects) resterait vivant
+        // jusqu'à la fin du scope, et le canal ne se fermerait donc jamais :
+        // les consommateurs resteraient bloqués sur `recv()` indéfiniment.
+        drop(tx);
     });
 
     let mut out = Arc::try_unwrap(results)

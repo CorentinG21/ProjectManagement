@@ -10,6 +10,7 @@
   --primary-soft: #f0ecff;
   --border: #edeef3;
   --border-strong: #e0e2ea;
+  --chip-bg: #eef0f5;
 
   --green: #16a34a;
   --green-soft: #e7f8ee;
@@ -47,6 +48,7 @@
   --primary-soft: #241f3d;
   --border: #232b3a;
   --border-strong: #2f3849;
+  --chip-bg: #1c2333;
 
   --green: #4ade80;
   --green-soft: #12241a;
@@ -176,20 +178,21 @@ svg {
 }
 
 .nav-item:hover {
-  background: var(--bg);
   color: var(--text);
 }
 
+/* Nav minimale : pas de fond sur l'actif, juste couleur + poids du texte
+   (l'icône suit puisqu'elle utilise stroke="currentColor"). */
 .nav-item.is-active {
-  background: var(--primary-soft);
   color: var(--primary);
+  font-weight: 700;
 }
 
 .nav-count {
   margin-left: auto;
   font-size: 11.5px;
-  background: var(--bg);
-  color: var(--text-dim);
+  background: transparent;
+  color: var(--text-faint);
   border-radius: 999px;
   padding: 1px 8px;
   min-width: 22px;
@@ -197,7 +200,6 @@ svg {
 }
 
 .nav-item.is-active .nav-count {
-  background: var(--card);
   color: var(--primary);
 }
 
@@ -487,6 +489,11 @@ svg {
   opacity: 0.75;
 }
 
+/* Action en cours (n'importe quel bouton) : l'icône tourne pendant l'appel. */
+.is-busy svg {
+  animation: spin 0.8s linear infinite;
+}
+
 .btn-danger {
   background: var(--red);
   border-color: var(--red);
@@ -573,6 +580,29 @@ svg {
   color: var(--text-dim);
   font-size: 12.5px;
   margin-top: 2px;
+}
+
+/* ---------- Vue d'ensemble : grille 2×2 + graphique à côté ---------- */
+.overview-grid {
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+  margin-bottom: 22px;
+  flex-wrap: wrap;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
+  gap: 12px;
+  width: 320px;
+  flex-shrink: 0;
+}
+
+.overview-grid .chart-panel {
+  flex: 1;
+  min-width: 320px;
+  margin-bottom: 0;
 }
 
 /* ---------- Project list ---------- */
@@ -1182,60 +1212,49 @@ svg {
 }
 
 /* ---------- Badges ---------- */
+/* Un seul style de badge, neutre, quel que soit son sens : seule la pastille
+   colorée porte l'information (risque, statut...). Évite d'empiler trois
+   signaux redondants (fond teinté + bordure + emoji) pour la même idée. */
 .badge {
   font-size: 11px;
   font-weight: 600;
-  padding: 3px 9px;
+  padding: 4px 10px 4px 8px;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   white-space: nowrap;
-}
-
-.badge.green {
-  color: var(--green);
-  background: var(--green-soft);
-}
-.badge.amber {
-  color: var(--amber);
-  background: var(--amber-soft);
-}
-.badge.red {
-  color: var(--red);
-  background: var(--red-soft);
-}
-.badge.neutral {
+  background: var(--chip-bg);
   color: var(--text-dim);
-  background: var(--bg);
 }
 
-/* Pill de niveau de risque : plus marqué qu'un badge classique (bordure),
-   c'est le repère visuel prioritaire avant même le détail des badges. */
+.badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.badge-dot.green {
+  background: var(--green);
+}
+.badge-dot.amber {
+  background: var(--amber);
+}
+.badge-dot.orange {
+  background: var(--orange);
+}
+.badge-dot.red {
+  background: var(--red);
+}
+.badge-dot.neutral {
+  background: var(--text-faint);
+}
+
+/* Badge de niveau de risque : même style neutre que les autres badges, texte
+   un peu plus appuyé puisque c'est le repère prioritaire de la ligne. */
 .risk-pill {
   font-weight: 700;
-  border: 1px solid transparent;
-}
-
-.risk-pill.risk-safe {
-  color: var(--green);
-  background: var(--green-soft);
-  border-color: var(--green);
-}
-.risk-pill.risk-attention {
-  color: var(--amber);
-  background: var(--amber-soft);
-  border-color: var(--amber);
-}
-.risk-pill.risk-risk {
-  color: var(--orange);
-  background: var(--orange-soft);
-  border-color: var(--orange);
-}
-.risk-pill.risk-critical {
-  color: var(--red);
-  background: var(--red-soft);
-  border-color: var(--red);
 }
 
 /* Liste itemisée des raisons (fiche détail + modale de suppression). */
@@ -1544,6 +1563,74 @@ svg {
   border-color: var(--primary);
 }
 
+/* ---------- Idées de projets ---------- */
+.add-idea {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.add-idea input {
+  flex: 1;
+  background: var(--card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 13.5px;
+  outline: none;
+}
+
+.add-idea input:focus {
+  border-color: var(--primary);
+}
+
+.ideas-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.idea-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 8px 10px 14px;
+}
+
+.idea-text {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.idea-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.idea-remove:hover {
+  color: var(--red);
+}
+
+.ideas-empty {
+  color: var(--text-faint);
+  font-size: 12.5px;
+  margin: 0;
+}
+
 /* ---------- Empty / loading states ---------- */
 .state {
   display: grid;
@@ -1752,6 +1839,12 @@ svg {
   }
   .stats {
     grid-template-columns: repeat(2, 1fr);
+  }
+  .overview-grid {
+    flex-direction: column;
+  }
+  .stat-grid {
+    width: 100%;
   }
 }
 
@@ -2197,6 +2290,9 @@ svg {
     opacity: 1; /* pas de survol sur mobile : toujours visible */
   }
   .stats {
+    grid-template-columns: 1fr;
+  }
+  .stat-grid {
     grid-template-columns: 1fr;
   }
   .user-name {

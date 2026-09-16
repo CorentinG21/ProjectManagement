@@ -95,6 +95,12 @@ interface ArchiveEntry {
   archivedAt: number;
 }
 
+interface IdeaItem {
+  id: string;
+  text: string;
+  createdAt: number;
+}
+
 type Filter =
   | "all"
   | "safe"
@@ -104,7 +110,7 @@ type Filter =
   | "favorites"
   | "inactive"
   | "duplicates";
-type ViewMode = "list" | "detail" | "settings" | "archives";
+type ViewMode = "list" | "detail" | "settings" | "archives" | "ideas";
 type SortBy = "name" | "size" | "commit" | "status";
 type Theme = "light" | "dark";
 
@@ -138,6 +144,7 @@ const ICONS: Record<string, string> = {
   tag: `<path d="M20.59 13.41 13.42 20.6a2 2 0 0 1-2.83 0L2.5 12.5V2.5h10L20.59 10.6a2 2 0 0 1 0 2.82Z"/><circle cx="7" cy="7" r="1"/>`,
   copy: `<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>`,
   archive: `<polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/>`,
+  bulb: `<path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.6c.6.5 1 1.2 1 2.4h6c0-1.2.4-1.9 1-2.4A7 7 0 0 0 12 2z"/>`,
   lock: `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`,
   cpu: `<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>`,
   command: `<path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/>`,
@@ -161,6 +168,7 @@ const NAV: { key: string; label: string; icon: string }[] = [
   { key: "inactive", label: "Inactifs", icon: "clock" },
   { key: "duplicates", label: "Doublons", icon: "copy" },
   { key: "archives", label: "Archives", icon: "archive" },
+  { key: "ideas", label: "Idées", icon: "bulb" },
   { key: "settings", label: "Dossiers scannés", icon: "gear" },
 ];
 
@@ -250,6 +258,40 @@ function saveArchives(): void {
   } catch {
     /* non bloquant */
   }
+}
+
+// ---------- Idées de projets (backlog personnel, sur la vue d'ensemble) ----------
+const IDEAS_KEY = "dpm.ideas";
+let ideas: IdeaItem[] = [];
+
+function loadIdeas(): void {
+  try {
+    const raw = localStorage.getItem(IDEAS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    ideas = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    ideas = [];
+  }
+}
+
+function saveIdeas(): void {
+  try {
+    localStorage.setItem(IDEAS_KEY, JSON.stringify(ideas));
+  } catch {
+    /* non bloquant */
+  }
+}
+
+function addIdea(text: string): void {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  ideas.unshift({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, text: trimmed, createdAt: Date.now() });
+  saveIdeas();
+}
+
+function removeIdea(id: string): void {
+  ideas = ideas.filter((i) => i.id !== id);
+  saveIdeas();
 }
 
 // ---------- Métadonnées locales (favoris, tags, notes) ----------
@@ -358,6 +400,26 @@ function toast(kind: "ok" | "err" | "info", title: string, body = ""): void {
   }`;
   container.appendChild(node);
   setTimeout(() => node.remove(), kind === "err" ? 8000 : 4000);
+}
+
+// Retour visuel générique pour toute action déclenchée par un bouton :
+// désactive le bouton et fait tourner son icône pendant l'appel, restaure
+// son état d'origine ensuite (succès ou échec). Utilisé pour toutes les
+// actions asynchrones (pull, push, fetch, suppression, nettoyage...) afin
+// qu'on voie toujours qu'une action est en cours, pas seulement le toast.
+async function withBusyButton<T>(btn: HTMLElement, fn: () => Promise<T>): Promise<T> {
+  const original = btn.innerHTML;
+  const asButton = "disabled" in btn ? (btn as HTMLButtonElement) : null;
+  if (asButton) asButton.disabled = true;
+  btn.classList.add("is-busy");
+  btn.innerHTML = icon("refresh");
+  try {
+    return await fn();
+  } finally {
+    if (asButton) asButton.disabled = false;
+    btn.classList.remove("is-busy");
+    btn.innerHTML = original;
+  }
 }
 
 // ---------- Pont vers le backend ----------
@@ -671,48 +733,52 @@ function countFor(key: string): number {
       return projects.filter((p) => duplicatesOf(p).length > 0).length;
     case "archives":
       return archives.length;
+    case "ideas":
+      return ideas.length;
     default:
       return projects.length;
   }
 }
 
 // ---------- Badges & libellés ----------
-// Un badge de statut avec une infobulle explicative au survol (attribut title).
-function badge(cls: string, text: string, tip: string): string {
-  return `<span class="badge ${cls}" title="${esc(tip)}">${text}</span>`;
+// Un badge de statut avec une infobulle explicative au survol (attribut
+// title). Fond neutre unique : seule la pastille (`dotCls`) porte le sens
+// (risque, statut...), pour éviter d'empiler plusieurs signaux redondants.
+function badge(dotCls: string, text: string, tip: string): string {
+  return `<span class="badge" title="${esc(tip)}"><span class="badge-dot ${dotCls}"></span>${text}</span>`;
 }
 
 // Niveau de risque global (4 paliers) : le premier repère visuel avant même
 // de lire le détail des badges.
 const RISK_META: Record<
   ProjectInfo["riskLevel"],
-  { label: string; cls: string; tip: string }
+  { label: string; dotCls: string; tip: string }
 > = {
   safe: {
-    label: "🟢 Sûr",
-    cls: "risk-safe",
+    label: "Sûr",
+    dotCls: "green",
     tip: "Tout est commité et poussé sur le remote : rien ne serait perdu.",
   },
   attention: {
-    label: "🟡 Attention",
-    cls: "risk-attention",
+    label: "Attention",
+    dotCls: "amber",
     tip: "Tout est poussé, mais du travail local (modifs, stash) n'est pas encore commité.",
   },
   risk: {
-    label: "🟠 Risque",
-    cls: "risk-risk",
+    label: "Risque",
+    dotCls: "orange",
     tip: "Des commits ne sont pas encore poussés sur le remote : ils seraient perdus.",
   },
   critical: {
-    label: "🔴 Critique",
-    cls: "risk-critical",
+    label: "Critique",
+    dotCls: "red",
     tip: "Ce projet n'est sauvegardé nulle part ailleurs que sur ce PC.",
   },
 };
 
 function riskBadge(p: ProjectInfo): string {
   const meta = RISK_META[p.riskLevel] ?? RISK_META.critical;
-  return `<span class="badge risk-pill ${meta.cls}" title="${esc(meta.tip)}">${meta.label}</span>`;
+  return `<span class="badge risk-pill" title="${esc(meta.tip)}"><span class="badge-dot ${meta.dotCls}"></span>${meta.label}</span>`;
 }
 
 function statusBadges(p: ProjectInfo, compact = false): string {
@@ -855,9 +921,11 @@ function currentSubtitle(): string {
 // ---------- Rendu : sidebar ----------
 function renderNav(): void {
   const nav = $("#nav");
-  const activeKey = viewMode === "settings" || viewMode === "archives" ? viewMode : filter;
+  const activeKey =
+    viewMode === "settings" || viewMode === "archives" || viewMode === "ideas" ? viewMode : filter;
   nav.innerHTML = NAV.map((item) => {
-    const showCount = item.key === "archives" ? true : item.key !== "settings" && scanned;
+    const showCount =
+      item.key === "archives" || item.key === "ideas" ? true : item.key !== "settings" && scanned;
     const count = showCount ? `<span class="nav-count">${countFor(item.key)}</span>` : "";
     return `<button class="nav-item ${
       item.key === activeKey ? "is-active" : ""
@@ -887,7 +955,9 @@ function pageHead(title: string, subtitle: string): string {
   return `<div class="page-head"><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div>`;
 }
 
-function statsHtml(): string {
+// Les 4 tuiles brutes, réutilisées à la fois dans la rangée simple (autres
+// filtres) et dans la grille 2×2 de la vue d'ensemble.
+function statCards(): string {
   const total = projects.length;
   const safe = projects.filter((p) => p.safeToDelete).length;
   const dirty = projects.filter((p) => p.isDirty).length;
@@ -896,12 +966,47 @@ function statsHtml(): string {
     `<div class="stat"><div class="stat-icon ${cls}">${icon(
       ic,
     )}</div><div><div class="stat-value"${id ? ` id="${id}"` : ""}>${value}</div><div class="stat-label">${label}</div></div></div>`;
-  return `<div class="stats">
-    ${card("violet", "folder", String(total), "Projets trouvés")}
-    ${card("green", "check", String(safe), "Supprimables")}
-    ${card("amber", "edit", String(dirty), "Avec modifs locales")}
-    ${card("blue", "disk", formatBytes(sum), "Espace total", "stat-size-value")}
+  return `${card("violet", "folder", String(total), "Projets trouvés")}${card(
+    "green",
+    "check",
+    String(safe),
+    "Supprimables",
+  )}${card("amber", "edit", String(dirty), "Avec modifs locales")}${card(
+    "blue",
+    "disk",
+    formatBytes(sum),
+    "Espace total",
+    "stat-size-value",
+  )}`;
+}
+
+function statsHtml(): string {
+  return `<div class="stats">${statCards()}</div>`;
+}
+
+// ---------- Idées de projets (backlog perso, sous la grille de stats) ----------
+function ideaRowHtml(i: IdeaItem): string {
+  return `<div class="idea-row">
+    <span class="idea-text">${esc(i.text)}</span>
+    <button class="idea-remove" data-action="remove-idea" data-idea-id="${esc(
+      i.id,
+    )}" title="Retirer cette idée">×</button>
   </div>`;
+}
+
+function ideasListInnerHtml(): string {
+  return ideas.length
+    ? ideas.map(ideaRowHtml).join("")
+    : `<p class="ideas-empty">Aucune idée pour l'instant — note ce qui te passe par la tête.</p>`;
+}
+
+// Rendu ciblé de la liste seule (sans redessiner toute la vue), après
+// ajout/retrait d'une idée — même logique que `renderRoots()`. On rafraîchit
+// aussi la nav pour que le compteur suive.
+function renderIdeasList(): void {
+  const el = document.getElementById("ideas-list");
+  if (el) el.innerHTML = ideasListInnerHtml();
+  renderNav();
 }
 
 function rowHtml(p: ProjectInfo): string {
@@ -974,15 +1079,19 @@ function renderList(): void {
   const rows = visible.length
     ? visible.map(rowHtml).join("")
     : `<div class="state" style="padding:52px 20px"><p>Aucun projet ne correspond à ce filtre.</p></div>`;
-  const chart =
+  // Vue d'ensemble : grille 2×2 des stats à côté du graphique de répartition.
+  // Les autres filtres gardent la rangée simple de 4 tuiles, sans graphique.
+  const overviewBlock =
     filter === "all"
-      ? `<div class="panel chart-panel"><div class="panel-head"><h2>Répartition de l'espace disque</h2></div><div id="overview-chart">${chartBody()}</div></div>`
-      : "";
+      ? `<div class="overview-grid">
+          <div class="stat-grid">${statCards()}</div>
+          <div class="panel chart-panel"><div class="panel-head"><h2>Répartition de l'espace disque</h2></div><div id="overview-chart">${chartBody()}</div></div>
+        </div>`
+      : statsHtml();
   view.innerHTML = `
     ${pageHead(currentTitle(), currentSubtitle())}
     ${scanBannerHtml()}
-    ${statsHtml()}
-    ${chart}
+    ${overviewBlock}
     <div id="bulk-bar" class="bulk-bar" hidden></div>
     <div class="panel">
       <div class="panel-head">
@@ -1288,6 +1397,30 @@ function renderArchives(): void {
     <div class="panel"><div class="archive-list">${rows}</div></div>`;
 }
 
+function renderIdeas(): void {
+  const view = $("#view");
+  view.innerHTML = `
+    ${pageHead(
+      "Idées de projets",
+      "Un backlog perso — les idées de projets que tu veux explorer un jour.",
+    )}
+    <div class="panel" style="padding:20px">
+      <form id="add-idea-form" class="add-idea">
+        <input id="add-idea-input" type="text" placeholder="Une idée à noter…" autocomplete="off" />
+        <button type="submit" class="btn btn-primary">Ajouter</button>
+      </form>
+      <div class="ideas-list" id="ideas-list">${ideasListInnerHtml()}</div>
+    </div>`;
+  $<HTMLFormElement>("#add-idea-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = $<HTMLInputElement>("#add-idea-input");
+    addIdea(input.value);
+    input.value = "";
+    renderIdeasList();
+    input.focus();
+  });
+}
+
 function renderWelcome(): void {
   $("#view").innerHTML = `
     ${pageHead(
@@ -1313,6 +1446,10 @@ function render(): void {
   }
   if (viewMode === "archives") {
     renderArchives();
+    return;
+  }
+  if (viewMode === "ideas") {
+    renderIdeas();
     return;
   }
   if (!scanned) {
@@ -1717,7 +1854,7 @@ async function doSecureProject(p: ProjectInfo): Promise<void> {
 }
 
 // ---------- Archiver (supprimer en gardant un souvenir) ----------
-function doArchiveProject(p: ProjectInfo): void {
+function doArchiveProject(p: ProjectInfo, btn: HTMLElement): void {
   const modal = $("#modal");
   $("#modal-body").innerHTML = `Le projet <strong>${esc(
     p.name,
@@ -1731,24 +1868,26 @@ function doArchiveProject(p: ProjectInfo): void {
     cancelBtn.onclick = null;
   };
   cancelBtn.onclick = close;
-  confirmBtn.onclick = async () => {
+  confirmBtn.onclick = () => {
     close();
-    try {
-      await call("delete_project", { path: p.path });
-    } catch (e) {
-      toast("err", `Archivage impossible — ${p.name}`, String(e));
-      return;
-    }
-    archives.push({
-      name: p.name,
-      path: p.path,
-      remoteUrl: p.remoteUrl,
-      sizeBytes: p.sizeBytes ?? 0,
-      archivedAt: Date.now(),
+    void withBusyButton(btn, async () => {
+      try {
+        await call("delete_project", { path: p.path });
+      } catch (e) {
+        toast("err", `Archivage impossible — ${p.name}`, String(e));
+        return;
+      }
+      archives.push({
+        name: p.name,
+        path: p.path,
+        remoteUrl: p.remoteUrl,
+        sizeBytes: p.sizeBytes ?? 0,
+        archivedAt: Date.now(),
+      });
+      saveArchives();
+      toast("ok", `${p.name} archivé`, "Retrouve-le dans Archives.");
+      performDeleteFollowUp(p);
     });
-    saveArchives();
-    toast("ok", `${p.name} archivé`, "Retrouve-le dans Archives.");
-    performDeleteFollowUp(p);
   };
 }
 
@@ -1939,7 +2078,7 @@ function paletteCommands(): PaletteCommand[] {
     label: `Aller à : ${item.label}`,
     icon: item.icon,
     run: () => {
-      if (item.key === "settings" || item.key === "archives") {
+      if (item.key === "settings" || item.key === "archives" || item.key === "ideas") {
         viewMode = item.key as ViewMode;
       } else {
         viewMode = "list";
@@ -2133,7 +2272,7 @@ function clearSelection(): void {
   render();
 }
 
-function bulkPull(): void {
+function bulkPull(btn: HTMLElement): void {
   const targets = [...selection]
     .map((p) => projectByPath(p))
     .filter((p): p is ProjectInfo => !!p && p.hasUpstream);
@@ -2142,7 +2281,7 @@ function bulkPull(): void {
     return;
   }
   toast("info", `Pull de ${targets.length} projet(s)…`);
-  void (async () => {
+  void withBusyButton(btn, async () => {
     let ok = 0;
     let fail = 0;
     for (const t of targets) {
@@ -2154,10 +2293,10 @@ function bulkPull(): void {
       }
     }
     toast(fail ? "err" : "ok", `Pull terminé : ${ok} OK${fail ? `, ${fail} échec(s)` : ""}`);
-  })();
+  });
 }
 
-function bulkDelete(): void {
+function bulkDelete(btn: HTMLElement): void {
   const targets = [...selection]
     .map((p) => projectByPath(p))
     .filter((p): p is ProjectInfo => !!p);
@@ -2179,26 +2318,30 @@ function bulkDelete(): void {
     cancelBtn.onclick = null;
   };
   cancelBtn.onclick = close;
-  confirmBtn.onclick = async () => {
+  // Le bouton du bandeau (`btn`) reste affiché le temps de l'opération : la
+  // modale se ferme tout de suite, mais son icône tourne jusqu'à la fin.
+  confirmBtn.onclick = () => {
     close();
-    let ok = 0;
-    let fail = 0;
-    for (const t of targets) {
-      try {
-        await call("delete_project", { path: t.path });
-        projects = projects.filter((x) => x.path !== t.path);
-        selection.delete(t.path);
-        ok++;
-      } catch {
-        fail++;
+    void withBusyButton(btn, async () => {
+      let ok = 0;
+      let fail = 0;
+      for (const t of targets) {
+        try {
+          await call("delete_project", { path: t.path });
+          projects = projects.filter((x) => x.path !== t.path);
+          selection.delete(t.path);
+          ok++;
+        } catch {
+          fail++;
+        }
       }
-    }
-    render();
-    toast(fail ? "err" : "ok", `${ok} projet(s) envoyé(s) à la corbeille${fail ? `, ${fail} échec(s)` : ""}`);
+      render();
+      toast(fail ? "err" : "ok", `${ok} projet(s) envoyé(s) à la corbeille${fail ? `, ${fail} échec(s)` : ""}`);
+    });
   };
 }
 
-function askDelete(p: ProjectInfo): void {
+function askDelete(p: ProjectInfo, btn: HTMLElement): void {
   const modal = $("#modal");
   const reasons = p.safeToDelete ? [] : unsafeReasons(p);
   const warning = reasons.length
@@ -2222,9 +2365,12 @@ function askDelete(p: ProjectInfo): void {
     cancelBtn.onclick = null;
   };
   cancelBtn.onclick = close;
+  // Même logique que bulkDelete : la modale se ferme tout de suite, le
+  // bouton d'origine (icône poubelle de la ligne, ou bouton de la fiche
+  // détail) tourne pendant la suppression réelle.
   confirmBtn.onclick = () => {
     close();
-    performDelete(p);
+    void withBusyButton(btn, () => performDelete(p));
   };
 }
 
@@ -2301,21 +2447,21 @@ function onAction(btn: HTMLElement): void {
   }
   if (action === "scan-clean") {
     const path = btn.dataset.path;
-    if (path) doScanClean(path);
+    if (path) void withBusyButton(btn, () => doScanClean(path));
     return;
   }
   if (action === "clean-selected") {
     const path = btn.dataset.path;
-    if (path) doCleanSelected(path);
+    if (path) void withBusyButton(btn, () => doCleanSelected(path));
     return;
   }
   if (action === "deep-analysis") {
     const path = btn.dataset.path;
-    if (path) doDeepAnalysis(path);
+    if (path) void withBusyButton(btn, () => doDeepAnalysis(path));
     return;
   }
   if (action === "check-tools") {
-    doCheckTools();
+    void withBusyButton(btn, () => doCheckTools());
     return;
   }
   if (action === "scan") {
@@ -2323,7 +2469,7 @@ function onAction(btn: HTMLElement): void {
     return;
   }
   if (action === "browse") {
-    browseFolder();
+    void withBusyButton(btn, () => browseFolder());
     return;
   }
   if (action === "select-all") {
@@ -2335,15 +2481,15 @@ function onAction(btn: HTMLElement): void {
     return;
   }
   if (action === "bulk-pull") {
-    bulkPull();
+    bulkPull(btn);
     return;
   }
   if (action === "bulk-delete") {
-    bulkDelete();
+    bulkDelete(btn);
     return;
   }
   if (action === "sync-all") {
-    doSyncAll();
+    void withBusyButton(btn, () => doSyncAll());
     return;
   }
   if (action === "open-palette") {
@@ -2352,12 +2498,24 @@ function onAction(btn: HTMLElement): void {
   }
   if (action === "archive-open") {
     const url = btn.dataset.url;
-    if (url) call("open_url", { url }).catch((e) => toast("err", "Ouverture du remote", String(e)));
+    if (url) {
+      void withBusyButton(btn, () =>
+        call("open_url", { url }).catch((e) => toast("err", "Ouverture du remote", String(e))),
+      );
+    }
     return;
   }
   if (action === "archive-remove") {
     const p = btn.dataset.archivePath;
     if (p) doRemoveArchive(p);
+    return;
+  }
+  if (action === "remove-idea") {
+    const id = btn.dataset.ideaId;
+    if (id) {
+      removeIdea(id);
+      renderIdeasList();
+    }
     return;
   }
   if (action === "remove-root") {
@@ -2373,15 +2531,15 @@ function onAction(btn: HTMLElement): void {
   if (!path) return;
   const p = projectByPath(path);
   if (!p) return;
-  if (action === "open") doOpen(p);
-  else if (action === "editor") doOpenEditor(p);
-  else if (action === "pull") doPull(p);
-  else if (action === "fetch") doFetch(p);
-  else if (action === "push") doPush(p);
-  else if (action === "remote") doOpenRemote(p);
-  else if (action === "secure") doSecureProject(p);
-  else if (action === "archive") doArchiveProject(p);
-  else if (action === "delete") askDelete(p);
+  if (action === "open") void withBusyButton(btn, () => doOpen(p));
+  else if (action === "editor") void withBusyButton(btn, () => doOpenEditor(p));
+  else if (action === "pull") void withBusyButton(btn, () => doPull(p));
+  else if (action === "fetch") void withBusyButton(btn, () => doFetch(p));
+  else if (action === "push") void withBusyButton(btn, () => doPush(p));
+  else if (action === "remote") void withBusyButton(btn, () => doOpenRemote(p));
+  else if (action === "secure") void withBusyButton(btn, () => doSecureProject(p));
+  else if (action === "archive") doArchiveProject(p, btn);
+  else if (action === "delete") askDelete(p, btn);
 }
 
 // ---------- Thème ----------
@@ -2504,6 +2662,7 @@ async function init(): Promise<void> {
   $("#palette-btn").innerHTML = icon("command");
   loadMeta();
   loadArchives();
+  loadIdeas();
   initTheme();
   $("#theme-btn").addEventListener("click", () =>
     applyTheme(theme === "dark" ? "light" : "dark"),
@@ -2545,7 +2704,7 @@ async function init(): Promise<void> {
     const btn = (e.target as HTMLElement).closest<HTMLElement>(".nav-item");
     if (!btn || !btn.dataset.key) return;
     const key = btn.dataset.key;
-    if (key === "settings" || key === "archives") {
+    if (key === "settings" || key === "archives" || key === "ideas") {
       viewMode = key as ViewMode;
     } else {
       viewMode = "list";
