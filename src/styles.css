@@ -15,6 +15,8 @@
   --green-soft: #e7f8ee;
   --amber: #d97706;
   --amber-soft: #fdf1df;
+  --orange: #ea580c;
+  --orange-soft: #fdead9;
   --red: #dc2626;
   --red-soft: #fdecec;
   --blue: #2563eb;
@@ -50,6 +52,8 @@
   --green-soft: #12241a;
   --amber: #fbbf24;
   --amber-soft: #2a2110;
+  --orange: #fb923c;
+  --orange-soft: #2a1a0d;
   --red: #f87171;
   --red-soft: #2a1616;
   --blue: #60a5fa;
@@ -785,6 +789,199 @@ svg {
   padding: 8px 0;
 }
 
+/* ---------- Tags & note perso (fiche détail) ---------- */
+.meta-block {
+  margin-bottom: 22px;
+}
+
+.meta-block .k {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.meta-block .k svg {
+  width: 13px;
+  height: 13px;
+}
+
+.tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 6px 4px 12px;
+  border-radius: 999px;
+}
+
+.tag-chip button {
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 3px;
+}
+
+.tag-chip button:hover {
+  opacity: 1;
+}
+
+.tag-add {
+  display: inline-flex;
+}
+
+.tag-input {
+  background: var(--card);
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 12.5px;
+  color: var(--text);
+  width: 140px;
+  outline: none;
+}
+
+.tag-input:focus {
+  border-color: var(--primary);
+  border-style: solid;
+}
+
+.note-input {
+  width: 100%;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  resize: vertical;
+  outline: none;
+}
+
+.note-input:focus {
+  border-color: var(--primary);
+}
+
+/* ---------- Nettoyage (node_modules, target, dist…) ---------- */
+.clean-block {
+  margin-bottom: 22px;
+}
+
+.clean-block .k {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.clean-block .k svg {
+  width: 13px;
+  height: 13px;
+}
+
+.clean-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-faint);
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+.clean-empty {
+  color: var(--text-faint);
+  font-size: 13px;
+  padding: 8px 0;
+  margin: 0;
+}
+
+.clean-hint {
+  color: var(--text-faint);
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+
+.clean-list {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.clean-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+.clean-row:last-child {
+  border-bottom: none;
+}
+
+.clean-row input[type="checkbox"] {
+  accent-color: var(--primary);
+}
+
+.clean-name {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.clean-path {
+  flex: 1;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clean-size {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.clean-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
 .list {
   display: flex;
   flex-direction: column;
@@ -792,7 +989,7 @@ svg {
 
 .row {
   display: grid;
-  grid-template-columns: 22px 40px minmax(0, 2.2fr) 1fr auto auto;
+  grid-template-columns: 22px 26px 40px minmax(0, 2.2fr) 1fr auto auto;
   align-items: center;
   gap: 16px;
   padding: 14px 20px;
@@ -811,6 +1008,47 @@ svg {
   cursor: pointer;
   accent-color: var(--primary);
   margin: 0;
+}
+
+/* ---------- Favoris ---------- */
+.fav-btn {
+  border: none;
+  background: transparent;
+  color: var(--border-strong);
+  cursor: pointer;
+  padding: 4px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  transition: color 0.12s ease, transform 0.12s ease;
+}
+
+.fav-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+}
+
+.fav-btn:hover {
+  color: var(--amber);
+  transform: scale(1.1);
+}
+
+.fav-btn.is-fav {
+  color: var(--amber);
+}
+
+.fav-btn.is-fav svg {
+  fill: var(--amber);
+}
+
+.fav-btn-lg {
+  align-self: flex-start;
+}
+
+.fav-btn-lg svg {
+  width: 24px;
+  height: 24px;
 }
 
 /* Animation de disparition lors d'une suppression. */
@@ -970,6 +1208,48 @@ svg {
 .badge.neutral {
   color: var(--text-dim);
   background: var(--bg);
+}
+
+/* Pill de niveau de risque : plus marqué qu'un badge classique (bordure),
+   c'est le repère visuel prioritaire avant même le détail des badges. */
+.risk-pill {
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+
+.risk-pill.risk-safe {
+  color: var(--green);
+  background: var(--green-soft);
+  border-color: var(--green);
+}
+.risk-pill.risk-attention {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-color: var(--amber);
+}
+.risk-pill.risk-risk {
+  color: var(--orange);
+  background: var(--orange-soft);
+  border-color: var(--orange);
+}
+.risk-pill.risk-critical {
+  color: var(--red);
+  background: var(--red-soft);
+  border-color: var(--red);
+}
+
+/* Liste itemisée des raisons (fiche détail + modale de suppression). */
+.reason-list {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.reason-list li {
+  margin: 2px 0;
+}
+
+.reason-note {
+  margin: 6px 0 0;
 }
 
 /* ---------- Chips techno ---------- */
@@ -1483,7 +1763,7 @@ svg {
     padding: 14px 16px;
   }
   .row {
-    grid-template-columns: 22px 36px 1fr auto;
+    grid-template-columns: 22px 22px 36px 1fr auto;
   }
   .row-badges,
   .row-meta {

@@ -14,6 +14,10 @@ interface ProjectInfo {
   ahead: number | null;
   behind: number | null;
   lastCommit: number | null;
+  modifiedFiles: number;
+  untrackedFiles: number;
+  stashCount: number;
+  riskLevel: "safe" | "attention" | "risk" | "critical";
   safeToDelete: boolean;
   error: string | null;
   sizeBytes?: number; // renseigné en arrière-plan
@@ -26,7 +30,25 @@ interface CommitLog {
   timestamp: number;
 }
 
-type Filter = "all" | "safe" | "dirty" | "ahead" | "noremote";
+interface CleanableEntry {
+  name: string;
+  path: string;
+  sizeBytes: number;
+}
+
+interface CleanOutcome {
+  path: string;
+  ok: boolean;
+  error: string | null;
+}
+
+interface ProjectMeta {
+  favorite: boolean;
+  tags: string[];
+  note: string;
+}
+
+type Filter = "all" | "safe" | "dirty" | "ahead" | "noremote" | "favorites" | "inactive";
 type ViewMode = "list" | "detail" | "settings";
 type SortBy = "name" | "size" | "commit" | "status";
 type Theme = "light" | "dark";
@@ -55,6 +77,10 @@ const ICONS: Record<string, string> = {
   moon: `<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>`,
   code: `<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>`,
   folderplus: `<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/>`,
+  star: `<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>`,
+  clock: `<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>`,
+  broom: `<path d="M4 20l4-4"/><path d="M13.5 6.5 21 14l-3 3-7.5-7.5"/><path d="M3 21l3-8 5 5z"/><path d="M13.5 6.5 17 3l4 4-3.5 3.5"/>`,
+  tag: `<path d="M20.59 13.41 13.42 20.6a2 2 0 0 1-2.83 0L2.5 12.5V2.5h10L20.59 10.6a2 2 0 0 1 0 2.82Z"/><circle cx="7" cy="7" r="1"/>`,
 };
 
 function icon(name: string): string {
@@ -65,12 +91,23 @@ function icon(name: string): string {
 
 const NAV: { key: string; label: string; icon: string }[] = [
   { key: "all", label: "Vue d'ensemble", icon: "grid" },
+  { key: "favorites", label: "Favoris", icon: "star" },
   { key: "safe", label: "Supprimables", icon: "check" },
   { key: "dirty", label: "Modifs locales", icon: "edit" },
   { key: "ahead", label: "Non poussés", icon: "up" },
   { key: "noremote", label: "Sans remote", icon: "cloudoff" },
+  { key: "inactive", label: "Inactifs", icon: "clock" },
   { key: "settings", label: "Dossiers scannés", icon: "gear" },
 ];
+
+// Seuil d'inactivité : au-delà, un projet est considéré "oublié".
+const INACTIVE_DAYS = 90;
+
+function isInactive(p: ProjectInfo): boolean {
+  if (p.lastCommit === null) return true;
+  const days = (Date.now() / 1000 - p.lastCommit) / 86_400;
+  return days > INACTIVE_DAYS;
+}
 
 // ---------- État ----------
 const ROOTS_KEY = "dpm.roots";
@@ -87,7 +124,39 @@ let sortBy: SortBy = "name";
 let theme: Theme = "light";
 const readmeCache = new Map<string, string | null>();
 const commitsCache = new Map<string, CommitLog[]>();
+const cleanableCache = new Map<string, CleanableEntry[]>();
 const selection = new Set<string>();
+
+// ---------- Métadonnées locales (favoris, tags, notes) ----------
+// Purement côté UI : ne dépend pas du backend, persistée par chemin de projet.
+const META_KEY = "dpm.meta";
+let metaStore: Record<string, ProjectMeta> = {};
+
+function loadMeta(): void {
+  try {
+    const raw = localStorage.getItem(META_KEY);
+    metaStore = raw ? JSON.parse(raw) : {};
+  } catch {
+    metaStore = {};
+  }
+}
+
+function saveMeta(): void {
+  try {
+    localStorage.setItem(META_KEY, JSON.stringify(metaStore));
+  } catch {
+    /* non bloquant */
+  }
+}
+
+function getMeta(path: string): ProjectMeta {
+  return metaStore[path] ?? { favorite: false, tags: [], note: "" };
+}
+
+function updateMeta(path: string, patch: Partial<ProjectMeta>): void {
+  metaStore[path] = { ...getMeta(path), ...patch };
+  saveMeta();
+}
 let renderScheduled = false;
 
 // Pendant un scan, des dizaines de projets peuvent arriver en quelques
@@ -174,13 +243,28 @@ const IN_TAURI = "__TAURI_INTERNALS__" in window;
 
 const now = Math.floor(Date.now() / 1000);
 const DEMO_PROJECTS: ProjectInfo[] = [
-  { name: "veille-tech-pkm", path: "C:\\Users\\Corentin\\Desktop\\Dev\\veille-tech-pkm", stack: ["Node", "TypeScript"], branch: "master", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/veille-tech-pkm.git", hasUpstream: true, isDirty: false, ahead: 0, behind: 0, lastCommit: now - 7200, safeToDelete: true, error: null, sizeBytes: 48 * 1024 * 1024 },
-  { name: "dev-project-manager", path: "C:\\Users\\Corentin\\Desktop\\Dev\\dev-project-manager", stack: ["Rust", "Node", "TypeScript"], branch: "main", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/dev-project-manager.git", hasUpstream: true, isDirty: true, ahead: 2, behind: 0, lastCommit: now - 3600, safeToDelete: false, error: null, sizeBytes: 220 * 1024 * 1024 },
-  { name: "portfolio-astro", path: "C:\\Users\\Corentin\\Desktop\\Dev\\portfolio-astro", stack: ["Node", "TypeScript"], branch: "main", hasRemote: true, remoteUrl: "git@github.com:CorentinG21/portfolio-astro.git", hasUpstream: true, isDirty: false, ahead: 3, behind: 0, lastCommit: now - 86400 * 5, safeToDelete: false, error: null, sizeBytes: 90 * 1024 * 1024 },
-  { name: "scripts-perso", path: "C:\\Users\\Corentin\\Documents\\scripts-perso", stack: ["Python"], branch: "master", hasRemote: false, remoteUrl: null, hasUpstream: false, isDirty: false, ahead: null, behind: null, lastCommit: now - 86400 * 40, safeToDelete: false, error: null, sizeBytes: 3 * 1024 * 1024 },
-  { name: "api-fastapi-lab", path: "C:\\Users\\Corentin\\Desktop\\Dev\\api-fastapi-lab", stack: ["Python"], branch: "main", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/api-fastapi-lab.git", hasUpstream: true, isDirty: false, ahead: 0, behind: 2, lastCommit: now - 86400 * 12, safeToDelete: true, error: null, sizeBytes: 15 * 1024 * 1024 },
-  { name: "game-jam-2025", path: "C:\\Users\\Corentin\\Desktop\\Dev\\game-jam-2025", stack: ["Node"], branch: "dev", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/game-jam-2025.git", hasUpstream: true, isDirty: true, ahead: 0, behind: 0, lastCommit: now - 86400 * 200, safeToDelete: false, error: null, sizeBytes: 512 * 1024 * 1024 },
+  { name: "veille-tech-pkm", path: "C:\\Users\\Corentin\\Desktop\\Dev\\veille-tech-pkm", stack: ["Node", "TypeScript"], branch: "master", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/veille-tech-pkm.git", hasUpstream: true, isDirty: false, ahead: 0, behind: 0, lastCommit: now - 7200, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "safe", safeToDelete: true, error: null, sizeBytes: 48 * 1024 * 1024 },
+  { name: "dev-project-manager", path: "C:\\Users\\Corentin\\Desktop\\Dev\\dev-project-manager", stack: ["Rust", "Node", "TypeScript"], branch: "main", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/dev-project-manager.git", hasUpstream: true, isDirty: true, ahead: 2, behind: 0, lastCommit: now - 3600, modifiedFiles: 3, untrackedFiles: 1, stashCount: 1, riskLevel: "risk", safeToDelete: false, error: null, sizeBytes: 1150 * 1024 * 1024 },
+  { name: "portfolio-astro", path: "C:\\Users\\Corentin\\Desktop\\Dev\\portfolio-astro", stack: ["Node", "TypeScript"], branch: "main", hasRemote: true, remoteUrl: "git@github.com:CorentinG21/portfolio-astro.git", hasUpstream: true, isDirty: false, ahead: 3, behind: 0, lastCommit: now - 86400 * 5, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "risk", safeToDelete: false, error: null, sizeBytes: 90 * 1024 * 1024 },
+  { name: "scripts-perso", path: "C:\\Users\\Corentin\\Documents\\scripts-perso", stack: ["Python"], branch: "master", hasRemote: false, remoteUrl: null, hasUpstream: false, isDirty: false, ahead: null, behind: null, lastCommit: now - 86400 * 400, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "critical", safeToDelete: false, error: null, sizeBytes: 3 * 1024 * 1024 },
+  { name: "api-fastapi-lab", path: "C:\\Users\\Corentin\\Desktop\\Dev\\api-fastapi-lab", stack: ["Python"], branch: "main", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/api-fastapi-lab.git", hasUpstream: true, isDirty: false, ahead: 0, behind: 2, lastCommit: now - 86400 * 120, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "safe", safeToDelete: true, error: null, sizeBytes: 15 * 1024 * 1024 },
+  { name: "game-jam-2025", path: "C:\\Users\\Corentin\\Desktop\\Dev\\game-jam-2025", stack: ["Node"], branch: "dev", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/game-jam-2025.git", hasUpstream: true, isDirty: true, ahead: 0, behind: 0, lastCommit: now - 86400 * 200, modifiedFiles: 2, untrackedFiles: 4, stashCount: 0, riskLevel: "attention", safeToDelete: false, error: null, sizeBytes: 512 * 1024 * 1024 },
 ];
+
+// Contenu simulé pour l'analyse de nettoyage (aperçu navigateur uniquement).
+const DEMO_CLEANABLE: Record<string, CleanableEntry[]> = {
+  "C:\\Users\\Corentin\\Desktop\\Dev\\dev-project-manager": [
+    { name: "node_modules", path: "C:\\...\\dev-project-manager\\node_modules", sizeBytes: 180 * 1024 * 1024 },
+    { name: "target", path: "C:\\...\\dev-project-manager\\src-tauri\\target", sizeBytes: 900 * 1024 * 1024 },
+  ],
+  "C:\\Users\\Corentin\\Desktop\\Dev\\game-jam-2025": [
+    { name: "node_modules", path: "C:\\...\\game-jam-2025\\node_modules", sizeBytes: 310 * 1024 * 1024 },
+    { name: "dist", path: "C:\\...\\game-jam-2025\\dist", sizeBytes: 40 * 1024 * 1024 },
+  ],
+  "C:\\Users\\Corentin\\Desktop\\Dev\\portfolio-astro": [
+    { name: "node_modules", path: "C:\\...\\portfolio-astro\\node_modules", sizeBytes: 75 * 1024 * 1024 },
+  ],
+};
 
 const DEMO_README = `# {name}
 
@@ -229,6 +313,15 @@ function demoCall<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
       { hash: "e4f5a6b", summary: "Correction du scan récursif", author: "Corentin", timestamp: now - 86400 },
       { hash: "9c8d7e6", summary: "Mise à jour du README", author: "Corentin", timestamp: now - 86400 * 3 },
     ] as unknown as T);
+  }
+  if (cmd === "scan_cleanable") {
+    const entries = DEMO_CLEANABLE[args.path as string] ?? [];
+    return new Promise((res) => setTimeout(() => res(entries as unknown as T), 400));
+  }
+  if (cmd === "clean_paths") {
+    const paths = args.paths as string[];
+    const outcomes: CleanOutcome[] = paths.map((path) => ({ path, ok: true, error: null }));
+    return Promise.resolve(outcomes as unknown as T);
   }
   if (cmd === "fetch_project" || cmd === "push_project") {
     const src = DEMO_PROJECTS.find((d) => d.path === args.path);
@@ -295,6 +388,10 @@ function matchesFilter(p: ProjectInfo): boolean {
       return (p.ahead ?? 0) > 0;
     case "noremote":
       return !p.hasRemote;
+    case "favorites":
+      return getMeta(p.path).favorite;
+    case "inactive":
+      return isInactive(p);
     default:
       return true;
   }
@@ -361,6 +458,10 @@ function countFor(key: string): number {
       return projects.filter((p) => (p.ahead ?? 0) > 0).length;
     case "noremote":
       return projects.filter((p) => !p.hasRemote).length;
+    case "favorites":
+      return projects.filter((p) => getMeta(p.path).favorite).length;
+    case "inactive":
+      return projects.filter(isInactive).length;
     default:
       return projects.length;
   }
@@ -372,6 +473,39 @@ function badge(cls: string, text: string, tip: string): string {
   return `<span class="badge ${cls}" title="${esc(tip)}">${text}</span>`;
 }
 
+// Niveau de risque global (4 paliers) : le premier repère visuel avant même
+// de lire le détail des badges.
+const RISK_META: Record<
+  ProjectInfo["riskLevel"],
+  { label: string; cls: string; tip: string }
+> = {
+  safe: {
+    label: "🟢 Sûr",
+    cls: "risk-safe",
+    tip: "Tout est commité et poussé sur le remote : rien ne serait perdu.",
+  },
+  attention: {
+    label: "🟡 Attention",
+    cls: "risk-attention",
+    tip: "Tout est poussé, mais du travail local (modifs, stash) n'est pas encore commité.",
+  },
+  risk: {
+    label: "🟠 Risque",
+    cls: "risk-risk",
+    tip: "Des commits ne sont pas encore poussés sur le remote : ils seraient perdus.",
+  },
+  critical: {
+    label: "🔴 Critique",
+    cls: "risk-critical",
+    tip: "Ce projet n'est sauvegardé nulle part ailleurs que sur ce PC.",
+  },
+};
+
+function riskBadge(p: ProjectInfo): string {
+  const meta = RISK_META[p.riskLevel] ?? RISK_META.critical;
+  return `<span class="badge risk-pill ${meta.cls}" title="${esc(meta.tip)}">${meta.label}</span>`;
+}
+
 function statusBadges(p: ProjectInfo, compact = false): string {
   if (p.error) {
     return badge(
@@ -380,7 +514,16 @@ function statusBadges(p: ProjectInfo, compact = false): string {
       "Impossible de lire l'état Git de ce dépôt (corrompu ou inaccessible).",
     );
   }
-  const b: string[] = [];
+  const b: string[] = [riskBadge(p)];
+  if (isInactive(p)) {
+    b.push(
+      badge(
+        "neutral",
+        "Inactif",
+        `Aucun commit depuis plus de ${INACTIVE_DAYS} jours.`,
+      ),
+    );
+  }
   if (!p.hasRemote) {
     b.push(
       badge(
@@ -425,30 +568,26 @@ function statusBadges(p: ProjectInfo, compact = false): string {
       ),
     );
   }
-  if (p.safeToDelete) {
-    b.push(
-      badge(
-        "green",
-        "Sauvegardé",
-        "Tout est commité et poussé sur le remote : suppression sans perte.",
-      ),
-    );
-  }
-  if (b.length === 0) {
-    b.push(
-      badge("green", "Propre", "Aucune modification en attente : le dossier de travail est propre."),
-    );
-  }
   return b.join("");
 }
 
+// Détail itemisé de ce qui serait perdu — c'est ce qui s'affiche dans la
+// fiche projet et dans la modale de confirmation avant suppression.
 function unsafeReasons(p: ProjectInfo): string[] {
   if (p.error) return [`Erreur Git : ${p.error}`];
   const r: string[] = [];
   if (!p.hasRemote) r.push("aucun remote configuré");
   if (p.hasRemote && !p.hasUpstream) r.push("la branche courante n'a jamais été poussée");
-  if (p.isDirty) r.push("des modifications ne sont pas commitées");
   if ((p.ahead ?? 0) > 0) r.push(`${p.ahead} commit(s) local(aux) non poussé(s)`);
+  if (p.modifiedFiles > 0) {
+    r.push(`${p.modifiedFiles} fichier(s) modifié(s) non commité(s)`);
+  }
+  if (p.untrackedFiles > 0) {
+    r.push(`${p.untrackedFiles} fichier(s) non suivi(s)`);
+  }
+  if (p.stashCount > 0) {
+    r.push(`${p.stashCount} entrée(s) de stash`);
+  }
   return r;
 }
 
@@ -462,6 +601,10 @@ function currentTitle(): string {
       return "Commits non poussés";
     case "noremote":
       return "Sans remote";
+    case "favorites":
+      return "Favoris";
+    case "inactive":
+      return "Projets inactifs";
     default:
       return "Vue d'ensemble";
   }
@@ -477,6 +620,10 @@ function currentSubtitle(): string {
       return "Du travail local pas encore poussé sur le remote.";
     case "noremote":
       return "⚠️ Ces projets ne sont sauvegardés nulle part.";
+    case "favorites":
+      return "Les projets que tu as marqués d'une étoile.";
+    case "inactive":
+      return `Aucun commit depuis plus de ${INACTIVE_DAYS} jours — candidats au grand ménage.`;
     default:
       return "Tous les projets Git détectés dans tes dossiers.";
   }
@@ -544,11 +691,15 @@ function rowHtml(p: ProjectInfo): string {
   const size = p.sizeBytes !== undefined ? formatBytes(p.sizeBytes) : "…";
   const commit = p.lastCommit ? formatRelative(p.lastCommit) : "—";
   const selected = selection.has(p.path);
+  const fav = getMeta(p.path).favorite;
   return `
     <div class="row ${selected ? "is-selected" : ""}" data-path="${esc(p.path)}">
       <input type="checkbox" class="row-check" data-check="${esc(p.path)}"${
         selected ? " checked" : ""
       } title="Sélectionner ce projet" />
+      <button class="fav-btn ${fav ? "is-fav" : ""}" data-fav="${esc(
+        p.path,
+      )}" title="${fav ? "Retirer des favoris" : "Ajouter aux favoris"}">${icon("star")}</button>
       <div class="row-avatar">${esc(initial)}</div>
       <div class="row-main">
         <div class="row-name">${esc(p.name)} ${branch}<span class="row-tech">${techChips(
@@ -633,15 +784,25 @@ function renderList(): void {
 function renderDetail(p: ProjectInfo): void {
   const view = $("#view");
   const initial = p.name.charAt(0) || "?";
+  const meta = getMeta(p.path);
+  const reasons = unsafeReasons(p);
   const safeBox = p.safeToDelete
     ? `<div class="safe-box ok">${icon(
         "shieldcheck",
       )}<div><strong>Suppression sûre</strong>Ce projet est intégralement sauvegardé sur son remote — tu peux le supprimer sans rien perdre.</div></div>`
-    : `<div class="safe-box no">${icon(
-        "alert",
-      )}<div><strong>Pas entièrement sauvegardé</strong>${esc(
-        unsafeReasons(p).join(" · ") || "état inconnu",
-      )}. La suppression reste possible, mais ces éléments locaux seront perdus (récupérables dans la corbeille).</div></div>`;
+    : `<div class="safe-box no">${icon("alert")}<div><strong>Pas entièrement sauvegardé</strong>
+        <ul class="reason-list">${reasons.map((r) => `<li>${esc(r)}</li>`).join("") || "<li>État inconnu</li>"}</ul>
+        <p class="reason-note">La suppression reste possible, mais ces éléments locaux seront perdus (récupérables dans la corbeille).</p>
+      </div></div>`;
+
+  const tagsHtml = meta.tags
+    .map(
+      (t) =>
+        `<span class="tag-chip">${esc(t)}<button data-action="remove-tag" data-path="${esc(
+          p.path,
+        )}" data-tag="${esc(t)}" title="Retirer ce tag">×</button></span>`,
+    )
+    .join("");
 
   const cells: { k: string; v: string; mono?: boolean }[] = [
     { k: "Branche", v: p.branch ?? "—" },
@@ -674,6 +835,11 @@ function renderDetail(p: ProjectInfo): void {
       <button class="back-btn" data-action="back" title="Retour">${icon("back")}</button>
     </div>
     <div class="detail-hero">
+      <button class="fav-btn fav-btn-lg ${meta.favorite ? "is-fav" : ""}" data-fav="${esc(
+        p.path,
+      )}" title="${meta.favorite ? "Retirer des favoris" : "Ajouter aux favoris"}">${icon(
+        "star",
+      )}</button>
       <div class="row-avatar">${esc(initial)}</div>
       <div class="detail-hero-info">
         <h1>${esc(p.name)}</h1>
@@ -684,6 +850,25 @@ function renderDetail(p: ProjectInfo): void {
     </div>
     ${safeBox}
     <div class="info-grid">${cellsHtml}${sizeCell}</div>
+
+    <div class="meta-block">
+      <div class="k">${icon("tag")} Tags</div>
+      <div class="tags-row">
+        ${tagsHtml}
+        <form class="tag-add" data-path="${esc(p.path)}">
+          <input type="text" class="tag-input" placeholder="Ajouter un tag…" maxlength="24" />
+        </form>
+      </div>
+    </div>
+    <div class="meta-block">
+      <div class="k">Note personnelle</div>
+      <textarea class="note-input" data-path="${esc(
+        p.path,
+      )}" placeholder="Ex. « Projet abandonné, ne pas supprimer »…" rows="2">${esc(
+        meta.note,
+      )}</textarea>
+    </div>
+
     <div class="readme-block">
       <div class="k">Aperçu du README</div>
       <div id="readme-section" class="readme-empty">Chargement…</div>
@@ -692,6 +877,16 @@ function renderDetail(p: ProjectInfo): void {
       <div class="k">Derniers commits</div>
       <div id="commits-section" class="commits-empty">Chargement…</div>
     </div>
+
+    <div class="clean-block">
+      <div class="k">${icon("broom")} Nettoyage</div>
+      <div id="clean-section">
+        <button class="btn btn-sm" data-action="scan-clean" data-path="${esc(
+          p.path,
+        )}">Analyser l'espace récupérable</button>
+      </div>
+    </div>
+
     <div class="detail-actions">
       <button class="btn" data-action="editor" data-path="${esc(p.path)}">${icon(
         "code",
@@ -1028,6 +1223,140 @@ function applyCommits(commits: CommitLog[]): void {
     .join("");
 }
 
+// ---------- Favoris, tags, notes ----------
+function toggleFavorite(path: string): void {
+  updateMeta(path, { favorite: !getMeta(path).favorite });
+  render();
+}
+
+function addTag(path: string, rawTag: string): void {
+  const tag = rawTag.trim();
+  if (!tag) return;
+  const meta = getMeta(path);
+  if (meta.tags.some((t) => t.toLowerCase() === tag.toLowerCase())) return;
+  updateMeta(path, { tags: [...meta.tags, tag] });
+  render();
+}
+
+function removeTag(path: string, tag: string): void {
+  const meta = getMeta(path);
+  updateMeta(path, { tags: meta.tags.filter((t) => t !== tag) });
+  render();
+}
+
+function saveNote(path: string, note: string): void {
+  updateMeta(path, { note });
+}
+
+// ---------- Nettoyage (node_modules, target, dist…) ----------
+async function doScanClean(path: string): Promise<void> {
+  const section = document.getElementById("clean-section");
+  if (section) {
+    section.innerHTML = `<div class="clean-loading"><span class="spinner spinner-sm"></span>Analyse en cours…</div>`;
+  }
+  try {
+    const entries = await call<CleanableEntry[]>("scan_cleanable", { path });
+    cleanableCache.set(path, entries);
+    if (selectedPath === path) renderCleanSection(path);
+  } catch (e) {
+    if (section) {
+      section.innerHTML = `<p class="clean-empty">Analyse impossible : ${esc(String(e))}</p>`;
+    }
+  }
+}
+
+function renderCleanSection(path: string): void {
+  const section = document.getElementById("clean-section");
+  if (!section) return;
+  const entries = cleanableCache.get(path) ?? [];
+  if (entries.length === 0) {
+    section.innerHTML = `<p class="clean-empty">Rien à nettoyer — aucun dossier régénérable (node_modules, target, dist…) détecté.</p>`;
+    return;
+  }
+  const rows = entries
+    .map(
+      (e) =>
+        `<div class="clean-row">
+          <input type="checkbox" checked data-clean="${esc(e.path)}" />
+          <span class="clean-name">${esc(e.name)}</span>
+          <span class="clean-path" title="${esc(e.path)}">${esc(e.path)}</span>
+          <span class="clean-size">${formatBytes(e.sizeBytes)}</span>
+        </div>`,
+    )
+    .join("");
+  const total = entries.reduce((a, e) => a + e.sizeBytes, 0);
+  section.innerHTML = `
+    <p class="clean-hint">Dossiers régénérables (jamais le code source ni l'historique Git) :</p>
+    <div class="clean-list">${rows}</div>
+    <div class="clean-footer">
+      <span>Sélection : <strong id="clean-total">${formatBytes(total)}</strong></span>
+      <button class="btn btn-sm btn-danger" data-action="clean-selected" data-path="${esc(
+        path,
+      )}">${icon("broom")} Nettoyer</button>
+    </div>`;
+}
+
+function updateCleanTotal(path: string): void {
+  const totalEl = document.getElementById("clean-total");
+  if (!totalEl) return;
+  const entries = cleanableCache.get(path) ?? [];
+  const checked = new Set(
+    Array.from(
+      document.querySelectorAll<HTMLInputElement>("#clean-section input[data-clean]:checked"),
+    ).map((el) => el.dataset.clean),
+  );
+  const total = entries
+    .filter((e) => checked.has(e.path))
+    .reduce((a, e) => a + e.sizeBytes, 0);
+  totalEl.textContent = formatBytes(total);
+}
+
+async function doCleanSelected(path: string): Promise<void> {
+  const checked = Array.from(
+    document.querySelectorAll<HTMLInputElement>("#clean-section input[data-clean]:checked"),
+  ).map((el) => el.dataset.clean as string);
+  if (checked.length === 0) {
+    toast("info", "Nettoyage", "Aucun dossier sélectionné.");
+    return;
+  }
+  const entries = cleanableCache.get(path) ?? [];
+  try {
+    const outcomes = await call<CleanOutcome[]>("clean_paths", { paths: checked });
+    const okPaths = new Set(outcomes.filter((o) => o.ok).map((o) => o.path));
+    const failed = outcomes.filter((o) => !o.ok);
+    const freed = entries
+      .filter((e) => okPaths.has(e.path))
+      .reduce((a, e) => a + e.sizeBytes, 0);
+
+    // Retire les dossiers nettoyés du cache et de la taille du projet.
+    cleanableCache.set(path, entries.filter((e) => !okPaths.has(e.path)));
+    const project = projectByPath(path);
+    if (project && project.sizeBytes !== undefined) {
+      project.sizeBytes = Math.max(0, project.sizeBytes - freed);
+    }
+
+    if (selectedPath === path) {
+      renderCleanSection(path);
+      const sizeEl = document.getElementById("detail-size");
+      if (sizeEl && project?.sizeBytes !== undefined) {
+        sizeEl.textContent = formatBytes(project.sizeBytes);
+      }
+    }
+    updateSizesDom();
+
+    if (freed > 0) {
+      toast(
+        failed.length ? "err" : "ok",
+        `${formatBytes(freed)} récupéré${failed.length ? ` (${failed.length} échec(s))` : ""}`,
+      );
+    } else {
+      toast("err", "Nettoyage", "Aucun dossier n'a pu être supprimé.");
+    }
+  } catch (e) {
+    toast("err", "Nettoyage impossible", String(e));
+  }
+}
+
 // ---------- Graphique donut (espace disque) ----------
 function chartBody(): string {
   const total = projects.reduce((a, p) => a + (p.sizeBytes ?? 0), 0);
@@ -1191,9 +1520,11 @@ function askDelete(p: ProjectInfo): void {
   const modal = $("#modal");
   const reasons = p.safeToDelete ? [] : unsafeReasons(p);
   const warning = reasons.length
-    ? `<div class="modal-warning">⚠️ Ce projet n'est <strong>pas entièrement sauvegardé</strong> : ${esc(
-        reasons.join(" · "),
-      )}. Ces éléments n'existent que sur ce PC et seront perdus (mais récupérables dans la corbeille).</div>`
+    ? `<div class="modal-warning">
+        <strong>⚠️ Pas entièrement sauvegardé :</strong>
+        <ul class="reason-list">${reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
+        Ces éléments n'existent que sur ce PC et seront perdus (mais récupérables dans la corbeille).
+      </div>`
     : "";
   $("#modal-body").innerHTML =
     `Le projet <strong>${esc(
@@ -1250,6 +1581,9 @@ function openDetail(path: string): void {
   render();
   loadReadme(path);
   loadCommits(path);
+  // Si le nettoyage a déjà été analysé pour ce projet, on réaffiche le
+  // résultat directement au lieu de repartir sur le bouton "Analyser".
+  if (cleanableCache.has(path)) renderCleanSection(path);
 }
 
 async function loadReadme(path: string): Promise<void> {
@@ -1291,6 +1625,22 @@ function onAction(btn: HTMLElement): void {
   if (action === "back") {
     viewMode = "list";
     render();
+    return;
+  }
+  if (action === "remove-tag") {
+    const path = btn.dataset.path;
+    const tag = btn.dataset.tag;
+    if (path && tag) removeTag(path, tag);
+    return;
+  }
+  if (action === "scan-clean") {
+    const path = btn.dataset.path;
+    if (path) doScanClean(path);
+    return;
+  }
+  if (action === "clean-selected") {
+    const path = btn.dataset.path;
+    if (path) doCleanSelected(path);
     return;
   }
   if (action === "scan") {
@@ -1430,6 +1780,7 @@ async function init(): Promise<void> {
     "search",
   )}<input id="search" type="search" placeholder="Rechercher un projet…" autocomplete="off" />`;
   $("#refresh-btn").innerHTML = icon("refresh");
+  loadMeta();
   initTheme();
   $("#theme-btn").addEventListener("click", () =>
     applyTheme(theme === "dark" ? "light" : "dark"),
@@ -1482,6 +1833,11 @@ async function init(): Promise<void> {
 
   $("#view").addEventListener("click", (e) => {
     const el = e.target as HTMLElement;
+    const favBtn = el.closest<HTMLElement>("[data-fav]");
+    if (favBtn?.dataset.fav) {
+      toggleFavorite(favBtn.dataset.fav);
+      return;
+    }
     const check = el.closest<HTMLInputElement>("input[data-check]");
     if (check?.dataset.check) {
       toggleSelection(check.dataset.check);
@@ -1501,8 +1857,37 @@ async function init(): Promise<void> {
     if (el.id === "sort-select") {
       sortBy = (el as HTMLSelectElement).value as SortBy;
       render();
+      return;
+    }
+    if (el.matches("#clean-section input[data-clean]") && selectedPath) {
+      updateCleanTotal(selectedPath);
     }
   });
+
+  // Ajout d'un tag (formulaire dans la fiche détail).
+  $("#view").addEventListener("submit", (e) => {
+    const form = e.target as HTMLElement;
+    if (!form.matches(".tag-add")) return;
+    e.preventDefault();
+    const path = (form as HTMLElement).dataset.path;
+    const input = form.querySelector<HTMLInputElement>(".tag-input");
+    if (path && input) {
+      addTag(path, input.value);
+      input.value = "";
+    }
+  });
+
+  // Sauvegarde de la note perso quand on quitte le champ.
+  $("#view").addEventListener(
+    "blur",
+    (e) => {
+      const el = e.target as HTMLElement;
+      if (el.matches(".note-input") && el.dataset.path) {
+        saveNote(el.dataset.path, (el as HTMLTextAreaElement).value);
+      }
+    },
+    true, // capture : "blur" ne bouillonne pas nativement
+  );
 
   // Bandeau de mise à jour
   $("#update-install").addEventListener("click", doInstallUpdate);

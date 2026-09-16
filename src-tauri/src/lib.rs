@@ -59,7 +59,16 @@ struct ProjectInfo {
     behind: Option<usize>,
     /// Date du dernier commit (timestamp Unix en secondes).
     last_commit: Option<i64>,
-    /// Vrai uniquement si le projet est intégralement sauvegardé sur le remote.
+    /// Nombre de fichiers suivis modifiés/supprimés/renommés non commités.
+    modified_files: usize,
+    /// Nombre de fichiers non suivis (nouveaux, jamais ajoutés à Git).
+    untracked_files: usize,
+    /// Nombre d'entrées dans le stash Git.
+    stash_count: usize,
+    /// Niveau de risque global : "safe" | "attention" | "risk" | "critical".
+    risk_level: &'static str,
+    /// Vrai uniquement si le projet est intégralement sauvegardé sur le remote
+    /// (équivalent à `risk_level == "safe"`, gardé pour compatibilité).
     safe_to_delete: bool,
     /// Message d'erreur si l'inspection Git a échoué.
     error: Option<String>,
@@ -83,6 +92,10 @@ impl ProjectInfo {
             ahead: None,
             behind: None,
             last_commit: None,
+            modified_files: 0,
+            untracked_files: 0,
+            stash_count: 0,
+            risk_level: "critical",
             safe_to_delete: false,
             error: None,
         }
@@ -145,7 +158,7 @@ fn detect_stack(dir: &Path) -> Vec<String> {
 fn inspect_repo(dir: &Path) -> ProjectInfo {
     let mut info = ProjectInfo::new(dir);
 
-    let repo = match Repository::open(dir) {
+    let mut repo = match Repository::open(dir) {
         Ok(r) => r,
         Err(e) => {
             info.error = Some(e.message().to_string());
@@ -166,13 +179,31 @@ fn inspect_repo(dir: &Path) -> ProjectInfo {
     }
 
     // Working tree sale ? On inclut les fichiers non suivis mais pas les ignorés.
+    // On distingue au passage fichiers modifiés (suivis) et non suivis (nouveaux),
+    // pour pouvoir détailler ce qui serait perdu avant une suppression.
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
         .include_ignored(false)
         .recurse_untracked_dirs(true);
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
         info.is_dirty = !statuses.is_empty();
+        for entry in statuses.iter() {
+            let status = entry.status();
+            if status.is_wt_new() || status.is_index_new() {
+                info.untracked_files += 1;
+            } else {
+                info.modified_files += 1;
+            }
+        }
     }
+
+    // Stash : du travail mis de côté qui ne serait jamais poussé sur le remote.
+    let mut stash_count = 0usize;
+    let _ = repo.stash_foreach(|_idx, _msg, _oid| {
+        stash_count += 1;
+        true
+    });
+    info.stash_count = stash_count;
 
     // Branche, dernier commit, et suivi de la branche distante.
     if let Ok(head) = repo.head() {
@@ -202,11 +233,29 @@ fn inspect_repo(dir: &Path) -> ProjectInfo {
         }
     }
 
-    // Règle métier : supprimable uniquement si tout est sur le remote.
-    info.safe_to_delete =
-        info.has_remote && info.has_upstream && !info.is_dirty && info.ahead == Some(0);
+    info.risk_level = compute_risk_level(&info);
+    info.safe_to_delete = info.risk_level == "safe";
 
     info
+}
+
+/// Calcule le niveau de risque d'une suppression, du plus grave au plus sûr :
+/// - critical : rien n'existe ailleurs que sur ce PC (pas de remote), ou état illisible.
+/// - risk     : des commits seraient perdus (jamais poussés, ou branche jamais poussée).
+/// - attention: tout est poussé, mais du travail local non commité existe encore
+///              (modifs, fichiers non suivis, stash).
+/// - safe     : strictement rien ne serait perdu.
+fn compute_risk_level(info: &ProjectInfo) -> &'static str {
+    if info.error.is_some() || !info.has_remote {
+        return "critical";
+    }
+    if !info.has_upstream || info.ahead.unwrap_or(0) > 0 {
+        return "risk";
+    }
+    if info.is_dirty || info.stash_count > 0 {
+        return "attention";
+    }
+    "safe"
 }
 
 /// Enlève les racines déjà couvertes par une autre racine de la liste (ex:
@@ -346,33 +395,153 @@ fn default_roots() -> Vec<String> {
     out
 }
 
+/// Calcule récursivement la taille d'un dossier (somme des fichiers, liens
+/// symboliques ignorés pour éviter les boucles).
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    for entry in entries.flatten() {
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            total += dir_size(&entry.path());
+        } else if let Ok(meta) = entry.metadata() {
+            total += meta.len();
+        }
+    }
+    total
+}
+
 /// Calcule la taille sur disque d'un projet (récursif, inclut node_modules).
 /// Volontairement séparé du scan pour ne pas le ralentir : appelé à la demande.
 #[tauri::command]
 fn project_size(path: String) -> u64 {
-    fn dir_size(dir: &Path) -> u64 {
-        let mut total = 0;
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return 0,
-        };
-        for entry in entries.flatten() {
-            let file_type = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(_) => continue,
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                total += dir_size(&entry.path());
-            } else if let Ok(meta) = entry.metadata() {
-                total += meta.len();
-            }
-        }
-        total
-    }
     dir_size(&PathBuf::from(path))
+}
+
+/// Dossiers d'artefacts régénérables : jamais de code source ni de données
+/// Git, uniquement des sorties de build/dépendances qu'on peut reconstruire
+/// (`npm install`, `cargo build`…). Liste volontairement plus large que
+/// `IGNORE_DIRS` (inclut aussi les dossiers cachés comme `.venv`/`.next`).
+const CLEANABLE_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    "vendor",
+    "__pycache__",
+    "obj",
+    "bin",
+    "coverage",
+    ".venv",
+    "venv",
+    ".next",
+    ".nuxt",
+    ".cache",
+];
+
+/// Profondeur maximale pour le scan de nettoyage : un projet a rarement plus
+/// de 8 niveaux avant un dossier d'artefacts.
+const CLEAN_SCAN_DEPTH: usize = 8;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanableEntry {
+    /// Nom du dossier d'artefacts (ex. "node_modules").
+    name: String,
+    /// Chemin absolu.
+    path: String,
+    /// Taille sur disque.
+    size_bytes: u64,
+}
+
+/// Cherche dans un projet les dossiers d'artefacts régénérables
+/// (`node_modules`, `target`, `dist`…) et calcule leur taille. Ne touche
+/// jamais à `.git` ni au code source : ne recurse que dans les dossiers
+/// normaux, s'arrête dès qu'un dossier d'artefacts est trouvé.
+fn scan_cleanable_dir(dir: &Path, depth: usize, out: &mut Vec<CleanableEntry>) {
+    if depth > CLEAN_SCAN_DEPTH {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() || !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.eq_ignore_ascii_case(".git") {
+            continue; // jamais touché, jamais recursé
+        }
+        if CLEANABLE_DIRS.iter().any(|d| d.eq_ignore_ascii_case(&name)) {
+            let path = entry.path();
+            out.push(CleanableEntry {
+                name,
+                size_bytes: dir_size(&path),
+                path: path.to_string_lossy().to_string(),
+            });
+            continue; // pas de recursion dans un dossier d'artefacts
+        }
+        if name.starts_with('.') {
+            continue; // autres dossiers cachés (.vscode, .idea…) : on n'y touche pas
+        }
+        scan_cleanable_dir(&entry.path(), depth + 1, out);
+    }
+}
+
+/// Analyse un projet pour trouver l'espace récupérable sans toucher au code
+/// source ni à l'historique Git.
+#[tauri::command]
+fn scan_cleanable(path: String) -> Vec<CleanableEntry> {
+    let mut out = Vec::new();
+    scan_cleanable_dir(&PathBuf::from(path), 0, &mut out);
+    out.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    out
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanOutcome {
+    path: String,
+    ok: bool,
+    error: Option<String>,
+}
+
+/// Envoie une liste de dossiers d'artefacts à la corbeille (réversible).
+/// Chaque chemin est traité indépendamment : un échec n'interrompt pas les
+/// autres.
+#[tauri::command]
+fn clean_paths(paths: Vec<String>) -> Vec<CleanOutcome> {
+    paths
+        .into_iter()
+        .map(|path| match trash::delete(&path) {
+            Ok(()) => CleanOutcome {
+                path,
+                ok: true,
+                error: None,
+            },
+            Err(e) => CleanOutcome {
+                path,
+                ok: false,
+                error: Some(e.to_string()),
+            },
+        })
+        .collect()
 }
 
 /// Envoie un projet à la corbeille (réversible, pas de suppression définitive).
@@ -581,7 +750,9 @@ pub fn run() {
             fetch_project,
             push_project,
             open_url,
-            recent_commits
+            recent_commits,
+            scan_cleanable,
+            clean_paths
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
