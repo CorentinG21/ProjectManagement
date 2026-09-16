@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "dev-project-manager"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "git2",
  "rfd",
