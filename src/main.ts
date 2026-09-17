@@ -20,6 +20,12 @@ interface ProjectInfo {
   riskLevel: "safe" | "attention" | "risk" | "critical";
   safeToDelete: boolean;
   error: string | null;
+  // Vrai si le dernier fetch/push tenté a échoué (remote supprimé, accès
+  // révoqué...) : ahead/behind/hasUpstream ne reflètent alors que le dernier
+  // état connu en cache, pas la réalité actuelle. Ne reflète que le dernier
+  // essai — un simple rescan (sans réseau) le remet à faux.
+  remoteUnreachable: boolean;
+  remoteError: string | null;
   sizeBytes?: number; // renseigné en arrière-plan
 }
 
@@ -194,7 +200,16 @@ function normalizeRemote(url: string | null): string | null {
 }
 
 // Regroupe les projets par remote normalisé ; ne garde que les groupes de 2+.
+// Mémoïsé sur l'identité du tableau `projects` : cette fonction est appelée
+// une fois par ligne à chaque rendu (via duplicatesOf/statusBadges), donc la
+// recalculer à chaque fois transformerait le rendu de la liste en O(n²).
+// `projects` n'est réassigné (nouvelle référence) que lors d'un scan ou d'une
+// suppression/filtre - les seuls moments où l'appartenance aux groupes peut
+// changer - donc comparer par référence suffit à invalider le cache.
+let dupGroupsCacheKey: ProjectInfo[] | null = null;
+let dupGroupsCache: Map<string, ProjectInfo[]> | null = null;
 function duplicateGroups(): Map<string, ProjectInfo[]> {
+  if (dupGroupsCacheKey === projects && dupGroupsCache) return dupGroupsCache;
   const groups = new Map<string, ProjectInfo[]>();
   for (const p of projects) {
     const key = normalizeRemote(p.remoteUrl);
@@ -206,6 +221,8 @@ function duplicateGroups(): Map<string, ProjectInfo[]> {
   for (const [key, arr] of groups) {
     if (arr.length < 2) groups.delete(key);
   }
+  dupGroupsCacheKey = projects;
+  dupGroupsCache = groups;
   return groups;
 }
 
@@ -430,12 +447,12 @@ const IN_TAURI = "__TAURI_INTERNALS__" in window;
 
 const now = Math.floor(Date.now() / 1000);
 const DEMO_PROJECTS: ProjectInfo[] = [
-  { name: "veille-tech-pkm", path: "C:\\Users\\Corentin\\Desktop\\Dev\\veille-tech-pkm", stack: ["Node", "TypeScript"], branch: "master", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/veille-tech-pkm.git", hasUpstream: true, isDirty: false, ahead: 0, behind: 0, lastCommit: now - 7200, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "safe", safeToDelete: true, error: null, sizeBytes: 48 * 1024 * 1024 },
-  { name: "dev-project-manager", path: "C:\\Users\\Corentin\\Desktop\\Dev\\dev-project-manager", stack: ["Rust", "Node", "TypeScript"], branch: "main", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/dev-project-manager.git", hasUpstream: true, isDirty: true, ahead: 2, behind: 0, lastCommit: now - 3600, modifiedFiles: 3, untrackedFiles: 1, stashCount: 1, riskLevel: "risk", safeToDelete: false, error: null, sizeBytes: 1150 * 1024 * 1024 },
-  { name: "portfolio-astro", path: "C:\\Users\\Corentin\\Desktop\\Dev\\portfolio-astro", stack: ["Node", "TypeScript"], branch: "main", hasRemote: true, remoteUrl: "git@github.com:CorentinG21/portfolio-astro.git", hasUpstream: true, isDirty: false, ahead: 3, behind: 0, lastCommit: now - 86400 * 5, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "risk", safeToDelete: false, error: null, sizeBytes: 90 * 1024 * 1024 },
-  { name: "scripts-perso", path: "C:\\Users\\Corentin\\Documents\\scripts-perso", stack: ["Python"], branch: "master", hasRemote: false, remoteUrl: null, hasUpstream: false, isDirty: false, ahead: null, behind: null, lastCommit: now - 86400 * 400, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "critical", safeToDelete: false, error: null, sizeBytes: 3 * 1024 * 1024 },
-  { name: "api-fastapi-lab", path: "C:\\Users\\Corentin\\Desktop\\Dev\\api-fastapi-lab", stack: ["Python"], branch: "main", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/api-fastapi-lab.git", hasUpstream: true, isDirty: false, ahead: 0, behind: 2, lastCommit: now - 86400 * 120, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "safe", safeToDelete: true, error: null, sizeBytes: 15 * 1024 * 1024 },
-  { name: "game-jam-2025", path: "C:\\Users\\Corentin\\Desktop\\Dev\\game-jam-2025", stack: ["Node"], branch: "dev", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/game-jam-2025.git", hasUpstream: true, isDirty: true, ahead: 0, behind: 0, lastCommit: now - 86400 * 200, modifiedFiles: 2, untrackedFiles: 4, stashCount: 0, riskLevel: "attention", safeToDelete: false, error: null, sizeBytes: 512 * 1024 * 1024 },
+  { name: "veille-tech-pkm", path: "C:\\Users\\Corentin\\Desktop\\Dev\\veille-tech-pkm", stack: ["Node", "TypeScript"], branch: "master", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/veille-tech-pkm.git", hasUpstream: true, isDirty: false, ahead: 0, behind: 0, lastCommit: now - 7200, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "safe", safeToDelete: true, error: null, remoteUnreachable: false, remoteError: null, sizeBytes: 48 * 1024 * 1024 },
+  { name: "dev-project-manager", path: "C:\\Users\\Corentin\\Desktop\\Dev\\dev-project-manager", stack: ["Rust", "Node", "TypeScript"], branch: "main", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/dev-project-manager.git", hasUpstream: true, isDirty: true, ahead: 2, behind: 0, lastCommit: now - 3600, modifiedFiles: 3, untrackedFiles: 1, stashCount: 1, riskLevel: "risk", safeToDelete: false, error: null, remoteUnreachable: false, remoteError: null, sizeBytes: 1150 * 1024 * 1024 },
+  { name: "portfolio-astro", path: "C:\\Users\\Corentin\\Desktop\\Dev\\portfolio-astro", stack: ["Node", "TypeScript"], branch: "main", hasRemote: true, remoteUrl: "git@github.com:CorentinG21/portfolio-astro.git", hasUpstream: true, isDirty: false, ahead: 3, behind: 0, lastCommit: now - 86400 * 5, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "risk", safeToDelete: false, error: null, remoteUnreachable: false, remoteError: null, sizeBytes: 90 * 1024 * 1024 },
+  { name: "scripts-perso", path: "C:\\Users\\Corentin\\Documents\\scripts-perso", stack: ["Python"], branch: "master", hasRemote: false, remoteUrl: null, hasUpstream: false, isDirty: false, ahead: null, behind: null, lastCommit: now - 86400 * 400, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "critical", safeToDelete: false, error: null, remoteUnreachable: false, remoteError: null, sizeBytes: 3 * 1024 * 1024 },
+  { name: "api-fastapi-lab", path: "C:\\Users\\Corentin\\Desktop\\Dev\\api-fastapi-lab", stack: ["Python"], branch: "main", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/api-fastapi-lab.git", hasUpstream: true, isDirty: false, ahead: 0, behind: 2, lastCommit: now - 86400 * 120, modifiedFiles: 0, untrackedFiles: 0, stashCount: 0, riskLevel: "safe", safeToDelete: true, error: null, remoteUnreachable: false, remoteError: null, sizeBytes: 15 * 1024 * 1024 },
+  { name: "game-jam-2025", path: "C:\\Users\\Corentin\\Desktop\\Dev\\game-jam-2025", stack: ["Node"], branch: "dev", hasRemote: true, remoteUrl: "https://github.com/CorentinG21/game-jam-2025.git", hasUpstream: true, isDirty: true, ahead: 0, behind: 0, lastCommit: now - 86400 * 200, modifiedFiles: 2, untrackedFiles: 4, stashCount: 0, riskLevel: "attention", safeToDelete: false, error: null, remoteUnreachable: false, remoteError: null, sizeBytes: 512 * 1024 * 1024 },
 ];
 
 // Contenu simulé pour l'analyse de nettoyage (aperçu navigateur uniquement).
@@ -809,6 +826,17 @@ function statusBadges(p: ProjectInfo, compact = false): string {
       ),
     );
   }
+  if (p.remoteUnreachable) {
+    b.push(
+      badge(
+        "red",
+        "Remote injoignable",
+        p.remoteError
+          ? `Le dernier fetch/push a échoué : ${p.remoteError}`
+          : "Le remote configuré ne répond plus (dépôt supprimé, accès révoqué...).",
+      ),
+    );
+  }
   if (!p.hasRemote) {
     b.push(
       badge(
@@ -856,11 +884,16 @@ function statusBadges(p: ProjectInfo, compact = false): string {
   return b.join("");
 }
 
-// Détail itemisé de ce qui serait perdu — c'est ce qui s'affiche dans la
+// Détail itemisé de ce qui serait perdu - c'est ce qui s'affiche dans la
 // fiche projet et dans la modale de confirmation avant suppression.
 function unsafeReasons(p: ProjectInfo): string[] {
   if (p.error) return [`Erreur Git : ${p.error}`];
   const r: string[] = [];
+  if (p.remoteUnreachable) {
+    r.push(
+      `remote injoignable au dernier essai (${p.remoteError ?? "dépôt supprimé ou accès révoqué"})`,
+    );
+  }
   if (!p.hasRemote) r.push("aucun remote configuré");
   if (p.hasRemote && !p.hasUpstream) r.push("la branche courante n'a jamais été poussée");
   if ((p.ahead ?? 0) > 0) r.push(`${p.ahead} commit(s) local(aux) non poussé(s)`);
@@ -900,7 +933,7 @@ function currentTitle(): string {
 function currentSubtitle(): string {
   switch (filter) {
     case "safe":
-      return "Entièrement sauvegardés sur leur remote — sûrs à supprimer.";
+      return "Entièrement sauvegardés sur leur remote - sûrs à supprimer.";
     case "dirty":
       return "Des changements ne sont pas encore commités.";
     case "ahead":
@@ -910,7 +943,7 @@ function currentSubtitle(): string {
     case "favorites":
       return "Les projets que tu as marqués d'une étoile.";
     case "inactive":
-      return `Aucun commit depuis plus de ${INACTIVE_DAYS} jours — candidats au grand ménage.`;
+      return `Aucun commit depuis plus de ${INACTIVE_DAYS} jours - candidats au grand ménage.`;
     case "duplicates":
       return "Le même remote existe dans plusieurs dossiers sur ce PC.";
     default:
@@ -965,7 +998,7 @@ function statCards(): string {
   const card = (cls: string, ic: string, value: string, label: string, id = "") =>
     `<div class="stat"><div class="stat-icon ${cls}">${icon(
       ic,
-    )}</div><div><div class="stat-value"${id ? ` id="${id}"` : ""}>${value}</div><div class="stat-label">${label}</div></div></div>`;
+    )}</div><div class="stat-text"><div class="stat-value"${id ? ` id="${id}"` : ""}>${value}</div><div class="stat-label">${label}</div></div></div>`;
   return `${card("violet", "folder", String(total), "Projets trouvés")}${card(
     "green",
     "check",
@@ -997,11 +1030,11 @@ function ideaRowHtml(i: IdeaItem): string {
 function ideasListInnerHtml(): string {
   return ideas.length
     ? ideas.map(ideaRowHtml).join("")
-    : `<p class="ideas-empty">Aucune idée pour l'instant — note ce qui te passe par la tête.</p>`;
+    : `<p class="ideas-empty">Aucune idée pour l'instant - note ce qui te passe par la tête.</p>`;
 }
 
 // Rendu ciblé de la liste seule (sans redessiner toute la vue), après
-// ajout/retrait d'une idée — même logique que `renderRoots()`. On rafraîchit
+// ajout/retrait d'une idée - même logique que `renderRoots()`. On rafraîchit
 // aussi la nav pour que le compteur suive.
 function renderIdeasList(): void {
   const el = document.getElementById("ideas-list");
@@ -1015,7 +1048,7 @@ function rowHtml(p: ProjectInfo): string {
     ? `<span class="row-branch">${icon("branch")}${esc(p.branch)}</span>`
     : "";
   const size = p.sizeBytes !== undefined ? formatBytes(p.sizeBytes) : "…";
-  const commit = p.lastCommit ? formatRelative(p.lastCommit) : "—";
+  const commit = p.lastCommit ? formatRelative(p.lastCommit) : "-";
   const selected = selection.has(p.path);
   const fav = getMeta(p.path).favorite;
   return `
@@ -1122,7 +1155,7 @@ function renderDetail(p: ProjectInfo): void {
   const safeBox = p.safeToDelete
     ? `<div class="safe-box ok">${icon(
         "shieldcheck",
-      )}<div><strong>Suppression sûre</strong>Ce projet est intégralement sauvegardé sur son remote — tu peux le supprimer sans rien perdre.</div></div>`
+      )}<div><strong>Suppression sûre</strong>Ce projet est intégralement sauvegardé sur son remote - tu peux le supprimer sans rien perdre.</div></div>`
     : `<div class="safe-box no">${icon("alert")}<div><strong>Pas entièrement sauvegardé</strong>
         <ul class="reason-list">${reasons.map((r) => `<li>${esc(r)}</li>`).join("") || "<li>État inconnu</li>"}</ul>
         <p class="reason-note">La suppression reste possible, mais ces éléments locaux seront perdus (récupérables dans la corbeille).</p>
@@ -1153,16 +1186,16 @@ function renderDetail(p: ProjectInfo): void {
     .join("");
 
   const cells: { k: string; v: string; mono?: boolean }[] = [
-    { k: "Branche", v: p.branch ?? "—" },
+    { k: "Branche", v: p.branch ?? "-" },
     { k: "État du dossier", v: p.isDirty ? "Modifs non commitées" : "Propre" },
     { k: "Remote", v: p.hasRemote ? "Configuré" : "Aucun" },
-    { k: "URL du remote", v: p.remoteUrl ?? "—", mono: true },
+    { k: "URL du remote", v: p.remoteUrl ?? "-", mono: true },
     { k: "Suivi distant", v: p.hasUpstream ? "Oui" : "Non" },
-    { k: "Commits en avance", v: p.ahead === null ? "—" : String(p.ahead) },
-    { k: "Commits en retard", v: p.behind === null ? "—" : String(p.behind) },
+    { k: "Commits en avance", v: p.ahead === null ? "-" : String(p.ahead) },
+    { k: "Commits en retard", v: p.behind === null ? "-" : String(p.behind) },
     {
       k: "Dernier commit",
-      v: p.lastCommit ? `${formatDate(p.lastCommit)} (${formatRelative(p.lastCommit)})` : "—",
+      v: p.lastCommit ? `${formatDate(p.lastCommit)} (${formatRelative(p.lastCommit)})` : "-",
     },
   ];
   const cellsHtml = cells
@@ -1402,7 +1435,7 @@ function renderIdeas(): void {
   view.innerHTML = `
     ${pageHead(
       "Idées de projets",
-      "Un backlog perso — les idées de projets que tu veux explorer un jour.",
+      "Un backlog perso - les idées de projets que tu veux explorer un jour.",
     )}
     <div class="panel" style="padding:20px">
       <form id="add-idea-form" class="add-idea">
@@ -1512,7 +1545,7 @@ async function fetchSizes(token: number): Promise<void> {
 function setScanBusy(busy: boolean): void {
   const btn = document.getElementById("scan-btn") as HTMLButtonElement | null;
   const label = document.querySelector(".btn-label");
-  const refresh = document.getElementById("refresh-btn");
+  const refresh = document.getElementById("refresh-btn") as HTMLButtonElement | null;
   if (btn) {
     btn.classList.toggle("is-loading", busy);
     btn.disabled = busy;
@@ -1524,13 +1557,20 @@ function setScanBusy(busy: boolean): void {
         ? "Rescanner"
         : "Scanner mes projets";
   }
-  if (refresh) refresh.classList.toggle("is-loading", busy);
+  if (refresh) {
+    refresh.classList.toggle("is-loading", busy);
+    refresh.disabled = busy;
+  }
 }
 
 // `manual` distingue un clic utilisateur (déclenche une notification résumé
 // en fin de scan) du scan automatique au démarrage (silencieux, pour ne pas
 // spammer l'utilisateur à chaque lancement de l'app).
 async function scan(manual = false): Promise<void> {
+  // Défense en profondeur en plus de la désactivation des boutons : empêche
+  // deux scans concurrents (ex. déclenchés via la palette de commandes) de
+  // tourner en même temps côté backend et de mélanger leurs résultats.
+  if (loading) return;
   if (roots.length === 0) {
     toast("info", "Aucun dossier", "Ajoute un dossier dans « Dossiers scannés ».");
     viewMode = "settings";
@@ -1602,7 +1642,7 @@ async function doPull(p: ProjectInfo): Promise<void> {
     const out = await call<string>("pull_project", { path: p.path });
     toast("ok", `${p.name} à jour`, out);
   } catch (e) {
-    toast("err", `Échec du pull — ${p.name}`, String(e));
+    toast("err", `Échec du pull - ${p.name}`, String(e));
   }
 }
 
@@ -1619,12 +1659,25 @@ function mergeProject(fresh: ProjectInfo): void {
 async function doFetch(p: ProjectInfo): Promise<void> {
   toast("info", `Fetch de ${p.name}…`);
   try {
+    // fetch_project ne rejette plus jamais : un échec (remote supprimé,
+    // accès révoqué...) est intégré dans le ProjectInfo renvoyé
+    // (remoteUnreachable/remoteError) plutôt que de lever une exception, pour
+    // que le badge/risque du projet reflète ce qu'on vient d'apprendre.
     const fresh = await call<ProjectInfo>("fetch_project", { path: p.path });
     mergeProject(fresh);
+    // Un fetch met à jour les refs distantes de TOUTES les branches locales :
+    // l'avance/retard mis en cache pour les branches autres que la courante
+    // (affiché dans l'analyse approfondie) serait donc périmé.
+    branchesCache.delete(p.path);
     render();
-    toast("ok", `${p.name} : refs distantes à jour`);
+    if (selectedPath === p.path) restoreDetailSections(p.path);
+    if (fresh.remoteUnreachable) {
+      toast("err", `Remote injoignable - ${p.name}`, fresh.remoteError ?? undefined);
+    } else {
+      toast("ok", `${p.name} : refs distantes à jour`);
+    }
   } catch (e) {
-    toast("err", `Échec du fetch — ${p.name}`, String(e));
+    toast("err", `Échec du fetch - ${p.name}`, String(e));
   }
 }
 
@@ -1633,10 +1686,18 @@ async function doPush(p: ProjectInfo): Promise<void> {
   try {
     const fresh = await call<ProjectInfo>("push_project", { path: p.path });
     mergeProject(fresh);
+    // Un push change l'avance de la branche courante par rapport à son
+    // upstream : le cache de branches (analyse approfondie) serait périmé.
+    branchesCache.delete(p.path);
     render();
-    toast("ok", `${p.name} poussé sur le remote`);
+    if (selectedPath === p.path) restoreDetailSections(p.path);
+    if (fresh.remoteUnreachable) {
+      toast("err", `Remote injoignable - ${p.name}`, fresh.remoteError ?? undefined);
+    } else {
+      toast("ok", `${p.name} poussé sur le remote`);
+    }
   } catch (e) {
-    toast("err", `Échec du push — ${p.name}`, String(e));
+    toast("err", `Échec du push - ${p.name}`, String(e));
   }
 }
 
@@ -1748,7 +1809,7 @@ function renderCleanSection(path: string): void {
   if (!section) return;
   const entries = cleanableCache.get(path) ?? [];
   if (entries.length === 0) {
-    section.innerHTML = `<p class="clean-empty">Rien à nettoyer — aucun dossier régénérable (node_modules, target, dist…) détecté.</p>`;
+    section.innerHTML = `<p class="clean-empty">Rien à nettoyer - aucun dossier régénérable (node_modules, target, dist…) détecté.</p>`;
     return;
   }
   const rows = entries
@@ -1841,7 +1902,14 @@ async function doSecureProject(p: ProjectInfo): Promise<void> {
   try {
     const fresh = await call<ProjectInfo>("secure_project", { path: p.path });
     mergeProject(fresh);
+    // Le commit + push vient de changer l'état des fichiers : ces caches
+    // seraient périmés (ex. liste de fichiers modifiés qui n'existent plus).
+    commitsCache.delete(p.path);
+    branchesCache.delete(p.path);
+    insightCache.delete(p.path);
+    fileStatusCache.delete(p.path);
     render();
+    if (selectedPath === p.path) restoreDetailSections(p.path);
     toast(
       fresh.safeToDelete ? "ok" : "info",
       fresh.safeToDelete
@@ -1849,13 +1917,14 @@ async function doSecureProject(p: ProjectInfo): Promise<void> {
         : `${p.name} : commit + push effectués, vérifie l'état restant`,
     );
   } catch (e) {
-    toast("err", `Sécurisation impossible — ${p.name}`, String(e));
+    toast("err", `Sécurisation impossible - ${p.name}`, String(e));
   }
 }
 
 // ---------- Archiver (supprimer en gardant un souvenir) ----------
 function doArchiveProject(p: ProjectInfo, btn: HTMLElement): void {
   const modal = $("#modal");
+  $("#modal-title").textContent = "Archiver le projet ?";
   $("#modal-body").innerHTML = `Le projet <strong>${esc(
     p.name,
   )}</strong> sera déplacé vers la corbeille, et une entrée sera gardée dans <strong>Archives</strong> avec un lien vers son remote pour le retrouver facilement.`;
@@ -1874,7 +1943,7 @@ function doArchiveProject(p: ProjectInfo, btn: HTMLElement): void {
       try {
         await call("delete_project", { path: p.path });
       } catch (e) {
-        toast("err", `Archivage impossible — ${p.name}`, String(e));
+        toast("err", `Archivage impossible - ${p.name}`, String(e));
         return;
       }
       archives.push({
@@ -1894,6 +1963,10 @@ function doArchiveProject(p: ProjectInfo, btn: HTMLElement): void {
 // Partie commune à la suppression normale et à l'archivage : retire le
 // projet de la liste avec l'animation adaptée à la vue courante.
 function performDeleteFollowUp(p: ProjectInfo): void {
+  // Sans ça, un projet supprimé/archivé individuellement (pas via l'action
+  // groupée) resterait fantôme dans `selection` : le compteur de la barre
+  // d'actions groupées resterait faussé indéfiniment.
+  selection.delete(p.path);
   const row =
     viewMode === "list"
       ? document.querySelector<HTMLElement>(`.row[data-path="${cssEscape(p.path)}"]`)
@@ -1958,6 +2031,7 @@ function healthChecklist(
 ): { ok: boolean; label: string }[] {
   const items: { ok: boolean; label: string }[] = [
     { ok: p.hasRemote, label: "Remote distant configuré" },
+    { ok: !p.remoteUnreachable, label: "Remote joignable au dernier essai" },
     { ok: p.hasUpstream, label: "Branche suivie par un remote" },
     { ok: !p.isDirty, label: "Aucune modification non commitée" },
     { ok: (p.ahead ?? 0) === 0, label: "Aucun commit en attente de push" },
@@ -2036,7 +2110,7 @@ function renderDeepSection(path: string): void {
 
   const secretsHtml = files && files.secrets.length
     ? `<div class="sub-k">🔑 Secrets potentiels</div>
-       <div class="secret-warning">La valeur n'est jamais lue ni affichée — seul l'emplacement est indiqué. Vérifie chaque ligne manuellement.</div>
+       <div class="secret-warning">La valeur n'est jamais lue ni affichée - seul l'emplacement est indiqué. Vérifie chaque ligne manuellement.</div>
        <div class="secret-list">${files.secrets
          .map((s) => `<div class="secret-row"><span class="fs-path">${esc(s.location)}</span><span>${esc(s.reason)}</span></div>`)
          .join("")}</div>`
@@ -2151,6 +2225,10 @@ function runPaletteSelection(index: number): void {
 }
 
 // ---------- Synchronisation globale ----------
+// Nombre maximum d'échecs détaillés dans le toast récapitulatif : au-delà,
+// on résume plutôt que de produire un pavé illisible pour un gros scan.
+const MAX_SYNC_FAILURES_LISTED = 6;
+
 async function doSyncAll(): Promise<void> {
   const targets = projects.filter((p) => p.hasRemote);
   if (targets.length === 0) {
@@ -2160,21 +2238,41 @@ async function doSyncAll(): Promise<void> {
   toast("info", `Synchronisation de ${targets.length} projet(s)…`);
   let upToDate = 0;
   let behindCount = 0;
-  let fail = 0;
+  // On garde le nom et la raison de chaque échec (au lieu d'un simple
+  // compteur) pour que l'utilisateur sache quoi vérifier sans devoir rouvrir
+  // chaque projet un par un.
+  const failed: { name: string; reason: string }[] = [];
   for (const t of targets) {
     try {
       const fresh = await call<ProjectInfo>("fetch_project", { path: t.path });
       mergeProject(fresh);
-      if ((fresh.behind ?? 0) > 0) behindCount++;
-      else upToDate++;
-    } catch {
-      fail++;
+      if (fresh.remoteUnreachable) {
+        failed.push({ name: t.name, reason: fresh.remoteError ?? "Remote injoignable" });
+      } else if ((fresh.behind ?? 0) > 0) {
+        behindCount++;
+      } else {
+        upToDate++;
+      }
+    } catch (e) {
+      failed.push({ name: t.name, reason: String(e) });
     }
   }
   render();
+  const failBody = failed.length
+    ? failed
+        .slice(0, MAX_SYNC_FAILURES_LISTED)
+        .map((f) => `${f.name} : ${f.reason}`)
+        .join("\n") +
+      (failed.length > MAX_SYNC_FAILURES_LISTED
+        ? `\n… et ${failed.length - MAX_SYNC_FAILURES_LISTED} de plus`
+        : "")
+    : "";
   toast(
-    fail ? "err" : "ok",
-    `Synchronisation terminée : ${upToDate} à jour, ${behindCount} en retard${fail ? `, ${fail} échec(s)` : ""}`,
+    failed.length ? "err" : "ok",
+    `Synchronisation terminée : ${upToDate} à jour, ${behindCount} en retard${
+      failed.length ? `, ${failed.length} échec(s)` : ""
+    }`,
+    failBody,
   );
 }
 
@@ -2192,9 +2290,13 @@ function chartBody(): string {
     label: p.name,
     bytes: p.sizeBytes ?? 0,
     color: palette[i],
+    path: p.path as string | null,
   }));
   const rest = total - topBytes;
-  if (rest > 0) segments.push({ label: "Autres", bytes: rest, color: "#94a3b8" });
+  // "Autres" agrège plusieurs projets : pas de fiche unique vers laquelle
+  // naviguer, contrairement aux segments ci-dessus qui pointent chacun vers
+  // un projet précis.
+  if (rest > 0) segments.push({ label: "Autres", bytes: rest, color: "#94a3b8", path: null });
 
   let cumulative = 0;
   const circles = segments
@@ -2212,7 +2314,11 @@ function chartBody(): string {
   const legend = segments
     .map(
       (s) =>
-        `<div class="leg"><span class="leg-dot" style="background:${
+        `<div class="leg${s.path ? " leg-clickable" : ""}"${
+          s.path
+            ? ` data-action="open-project" data-path="${esc(s.path)}" title="Ouvrir ${esc(s.label)}"`
+            : ""
+        }><span class="leg-dot" style="background:${
           s.color
         }"></span><span class="leg-name">${esc(s.label)}</span><span class="leg-val">${formatBytes(
           s.bytes,
@@ -2306,6 +2412,7 @@ function bulkDelete(btn: HTMLElement): void {
   const warning = unsafe
     ? `<div class="modal-warning">⚠️ ${unsafe} projet(s) sur ${targets.length} ne sont pas entièrement sauvegardés : leurs éléments locaux seront perdus (récupérables dans la corbeille).</div>`
     : "";
+  $("#modal-title").textContent = "Supprimer le projet ?";
   $("#modal-body").innerHTML =
     `<strong>${targets.length}</strong> projet(s) seront déplacés vers la corbeille (local uniquement, GitHub n'est pas touché).` +
     warning;
@@ -2351,6 +2458,7 @@ function askDelete(p: ProjectInfo, btn: HTMLElement): void {
         Ces éléments n'existent que sur ce PC et seront perdus (mais récupérables dans la corbeille).
       </div>`
     : "";
+  $("#modal-title").textContent = "Supprimer le projet ?";
   $("#modal-body").innerHTML =
     `Le projet <strong>${esc(
       p.name,
@@ -2380,7 +2488,7 @@ async function performDelete(p: ProjectInfo): Promise<void> {
   try {
     await call("delete_project", { path: p.path });
   } catch (e) {
-    toast("err", `Suppression impossible — ${p.name}`, String(e));
+    toast("err", `Suppression impossible - ${p.name}`, String(e));
     return;
   }
   toast("ok", `${p.name} envoyé à la corbeille`);
@@ -2391,11 +2499,19 @@ function openDetail(path: string): void {
   selectedPath = path;
   viewMode = "detail";
   render();
+  restoreDetailSections(path);
+}
+
+// Réaffiche le README, les commits et les analyses déjà chargés pour ce
+// projet après un `render()` qui a reconstruit la fiche détail depuis zéro
+// (ex. après fetch/push/sécuriser) - sans ça, ces sections reviendraient à
+// leur état "Chargement…"/bouton initial alors que les données sont déjà
+// en cache.
+function restoreDetailSections(path: string): void {
   loadReadme(path);
   loadCommits(path);
-  // Si le nettoyage a déjà été analysé pour ce projet, on réaffiche le
-  // résultat directement au lieu de repartir sur le bouton "Analyser".
   if (cleanableCache.has(path)) renderCleanSection(path);
+  if (branchesCache.has(path)) renderDeepSection(path);
 }
 
 async function loadReadme(path: string): Promise<void> {
@@ -2437,6 +2553,11 @@ function onAction(btn: HTMLElement): void {
   if (action === "back") {
     viewMode = "list";
     render();
+    return;
+  }
+  if (action === "open-project") {
+    const path = btn.dataset.path;
+    if (path) openDetail(path);
     return;
   }
   if (action === "remove-tag") {
@@ -2585,7 +2706,7 @@ async function notifyScanSummary(): Promise<void> {
     const body =
       critical > 0
         ? `⚠️ ${critical} projet(s) non sauvegardé(s) du tout. ${safe} supprimable(s) en sécurité.`
-        : `${projects.length} projet(s) analysé(s) — ${safe} supprimable(s) en sécurité.`;
+        : `${projects.length} projet(s) analysé(s) - ${safe} supprimable(s) en sécurité.`;
     sendNotification({ title: "Dev Project Manager", body });
   } catch {
     // Notifications indisponibles (permission refusée, plateforme…) : silencieux.
@@ -2621,7 +2742,7 @@ async function checkForUpdate(): Promise<void> {
 function showUpdateBanner(version: string): void {
   const text = document.getElementById("update-text");
   if (text) {
-    text.textContent = `Version ${version} disponible — installe-la pour la dernière version.`;
+    text.textContent = `Version ${version} disponible - installe-la pour la dernière version.`;
   }
   const banner = document.getElementById("update-banner");
   if (banner) banner.hidden = false;

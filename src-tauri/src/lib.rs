@@ -1,4 +1,4 @@
-// dev-project-manager — backend Tauri
+// dev-project-manager - backend Tauri
 //
 // Scanne des dossiers racines pour retrouver les projets Git, calcule leur
 // état (modifs locales, commits non poussés, remote), puis expose des actions
@@ -72,6 +72,19 @@ struct ProjectInfo {
     safe_to_delete: bool,
     /// Message d'erreur si l'inspection Git a échoué.
     error: Option<String>,
+    /// Vrai si le dernier `fetch`/`push` tenté a échoué : le remote configuré
+    /// ne répond plus (dépôt supprimé, accès révoqué...). Dans ce cas,
+    /// `ahead`/`behind`/`has_upstream` ne reflètent que le dernier état connu
+    /// en cache localement, pas la réalité actuelle — on ne peut plus
+    /// garantir que le projet est sauvegardé, donc `risk_level` est forcé à
+    /// "critical" tant que ça n'est pas résolu. Reflète seulement le dernier
+    /// essai : un simple rescan (qui ne touche jamais au réseau) ne le
+    /// détecte pas, il faut un nouveau fetch/push pour re-vérifier.
+    remote_unreachable: bool,
+    /// Message d'erreur Git du dernier fetch/push qui a échoué (None si
+    /// `remote_unreachable` est faux ou si aucun fetch/push n'a encore été
+    /// tenté depuis le dernier scan).
+    remote_error: Option<String>,
 }
 
 impl ProjectInfo {
@@ -98,6 +111,8 @@ impl ProjectInfo {
             risk_level: "critical",
             safe_to_delete: false,
             error: None,
+            remote_unreachable: false,
+            remote_error: None,
         }
     }
 }
@@ -246,7 +261,7 @@ fn inspect_repo(dir: &Path) -> ProjectInfo {
 /// - critical : rien n'existe ailleurs que sur ce PC (pas de remote), ou état illisible.
 /// - risk     : des commits seraient perdus (jamais poussés, ou branche jamais poussée).
 /// - attention: tout est poussé, mais du travail local non commité existe encore
-///              (modifs, fichiers non suivis, stash).
+///   (modifs, fichiers non suivis, stash).
 /// - safe     : strictement rien ne serait perdu.
 fn compute_risk_level(info: &ProjectInfo) -> &'static str {
     if info.error.is_some() || !info.has_remote {
@@ -292,7 +307,7 @@ fn dedupe_roots(roots: Vec<String>) -> Vec<PathBuf> {
 /// Parcours récursif d'un dossier à la recherche de dépôts Git : s'arrête dès
 /// qu'il en trouve un (on ne descend jamais dans un projet) et ignore les
 /// dossiers lourds/cachés. Chaque dépôt trouvé est envoyé immédiatement dans
-/// `tx` — il part à l'inspection tout de suite, sans attendre que le reste du
+/// `tx` - il part à l'inspection tout de suite, sans attendre que le reste du
 /// disque ait fini d'être exploré (voir `scan_projects`). Au premier niveau
 /// sous chaque racine, les sous-dossiers sont explorés en parallèle (un
 /// thread par sous-dossier) pour accélérer la découverte sur de gros disques.
@@ -354,7 +369,7 @@ fn find_repo_dirs(dir: &Path, depth: usize, tx: &mpsc::Sender<PathBuf>) {
 /// séquentielles : des threads "producteurs" parcourent les racines et
 /// déposent chaque dépôt trouvé dans un canal dès qu'ils tombent dessus,
 /// pendant qu'un pool de threads "consommateurs" (borné au nombre de cœurs)
-/// les inspecte au fil de l'eau — un gros dépôt (long `git status`) ne fait
+/// les inspecte au fil de l'eau - un gros dépôt (long `git status`) ne fait
 /// donc pas attendre les autres, et les résultats commencent à s'afficher
 /// côté frontend dès le premier trouvé plutôt qu'après tout le scan.
 #[tauri::command]
@@ -403,7 +418,7 @@ fn scan_projects(app: AppHandle, roots: Vec<String>) -> Vec<ProjectInfo> {
     let mut out = Arc::try_unwrap(results)
         .map(|m| m.into_inner().unwrap())
         .unwrap_or_default();
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
 
@@ -545,7 +560,7 @@ fn scan_cleanable_dir(dir: &Path, depth: usize, out: &mut Vec<CleanableEntry>) {
 fn scan_cleanable(path: String) -> Vec<CleanableEntry> {
     let mut out = Vec::new();
     scan_cleanable_dir(&PathBuf::from(path), 0, &mut out);
-    out.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    out.sort_by_key(|b| std::cmp::Reverse(b.size_bytes));
     out
 }
 
@@ -783,7 +798,7 @@ fn scan_files_insight(path: String) -> FilesInsight {
     let mut large_files = Vec::new();
     let mut secrets = Vec::new();
     scan_project_files(&PathBuf::from(path), 0, &mut large_files, &mut secrets);
-    large_files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    large_files.sort_by_key(|b| std::cmp::Reverse(b.size_bytes));
     FilesInsight {
         large_files,
         secrets,
@@ -801,8 +816,25 @@ struct ToolCheck {
 }
 
 fn check_tool(display_name: &str, cmd_name: &str, args: &[&str]) -> ToolCheck {
-    let mut cmd = std::process::Command::new(cmd_name);
-    cmd.args(args);
+    // Sous Windows, on passe par `cmd /C` plutôt que d'exécuter `cmd_name`
+    // directement : certains outils (VS Code notamment) ne sont sur le PATH
+    // que via un script `.cmd`, que `Command::new` seul ne sait pas résoudre
+    // (contrairement à un vrai shell). `git`/`node`/`cargo`/`python`/`docker`
+    // sont de vrais `.exe` et fonctionneraient sans, mais passer par `cmd`
+    // pour tous uniformise le comportement sans coût perceptible (vérification
+    // ponctuelle, pas un chemin chaud).
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(cmd_name).args(args);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = std::process::Command::new(cmd_name);
+        c.args(args);
+        c
+    };
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -986,26 +1018,24 @@ fn file_status(path: String) -> Vec<FileStatusEntry> {
 fn secure_project(path: String) -> Result<ProjectInfo, String> {
     run_git(&path, &["add", "-A"]).map_err(|e| format!("git add a échoué : {e}"))?;
 
-    if let Err(e) = run_git(
-        &path,
-        &[
-            "commit",
-            "-m",
-            "Sécurisé automatiquement avant suppression (Dev Project Manager)",
-        ],
-    ) {
-        let lower = e.to_lowercase();
-        let nothing_to_commit = [
-            "nothing to commit",
-            "rien à valider",
-            "arbre de travail propre",
-            "working tree clean",
-        ]
-        .iter()
-        .any(|kw| lower.contains(kw));
-        if !nothing_to_commit {
-            return Err(format!("git commit a échoué : {e}"));
-        }
+    // On vérifie s'il y a quelque chose à commiter via `--porcelain` (sortie
+    // stable, indépendante de la langue) plutôt qu'en devinant si le message
+    // d'erreur de `git commit` correspond à "rien à valider" : ce message
+    // varie selon la langue configurée pour Git, et une locale non prévue
+    // ferait échouer la sécurisation à tort alors qu'il n'y avait juste rien
+    // à commiter.
+    let status = run_git(&path, &["status", "--porcelain"])
+        .map_err(|e| format!("git status a échoué : {e}"))?;
+    if !status.trim().is_empty() {
+        run_git(
+            &path,
+            &[
+                "commit",
+                "-m",
+                "Sécurisé automatiquement avant suppression (Dev Project Manager)",
+            ],
+        )
+        .map_err(|e| format!("git commit a échoué : {e}"))?;
     }
 
     run_git(&path, &["push", "-u", "origin", "HEAD"])
@@ -1039,20 +1069,47 @@ fn pull_project(path: String) -> Result<String, String> {
     run_git(&path, &["pull", "--ff-only"])
 }
 
+/// Marque une info de projet fraîchement inspectée comme non vérifiable :
+/// le fetch/push qui vient d'échouer signifie que le remote configuré ne
+/// répond plus (dépôt supprimé, accès révoqué, panne réseau...). Les
+/// `ahead`/`behind`/`has_upstream` actuels ne reflètent que le dernier état
+/// connu en cache localement, pas la réalité — on ne peut donc plus
+/// garantir que le projet est sauvegardé, quel que soit ce que dit le cache.
+fn mark_remote_unreachable(info: &mut ProjectInfo, error: String) {
+    info.remote_unreachable = true;
+    info.remote_error = Some(error);
+    info.risk_level = "critical";
+    info.safe_to_delete = false;
+}
+
 /// Récupère les refs distantes sans fusionner (`git fetch --prune`), puis
-/// renvoie l'état Git réactualisé du projet (avance/retard à jour).
+/// renvoie l'état Git réactualisé du projet (avance/retard à jour). Ne
+/// renvoie plus d'erreur côté Tauri si le fetch échoue : l'échec est
+/// intégré dans le `ProjectInfo` renvoyé (`remoteUnreachable`/`remoteError`)
+/// pour que l'appelant puisse à la fois l'afficher et mettre à jour l'état
+/// persistant du projet (badge, niveau de risque) en une seule fois.
 #[tauri::command]
-fn fetch_project(path: String) -> Result<ProjectInfo, String> {
-    run_git(&path, &["fetch", "--prune"])?;
-    Ok(inspect_repo(&PathBuf::from(&path)))
+fn fetch_project(path: String) -> ProjectInfo {
+    let fetch_err = run_git(&path, &["fetch", "--prune"]).err();
+    let mut info = inspect_repo(&PathBuf::from(&path));
+    if let Some(err) = fetch_err {
+        mark_remote_unreachable(&mut info, err);
+    }
+    info
 }
 
 /// Pousse la branche courante (`git push -u origin HEAD` : crée le suivi
-/// distant si besoin), puis renvoie l'état Git réactualisé.
+/// distant si besoin), puis renvoie l'état Git réactualisé. Même logique que
+/// `fetch_project` : un échec (remote introuvable...) est intégré dans le
+/// `ProjectInfo` renvoyé plutôt que de faire échouer l'appel Tauri.
 #[tauri::command]
-fn push_project(path: String) -> Result<ProjectInfo, String> {
-    run_git(&path, &["push", "-u", "origin", "HEAD"])?;
-    Ok(inspect_repo(&PathBuf::from(&path)))
+fn push_project(path: String) -> ProjectInfo {
+    let push_err = run_git(&path, &["push", "-u", "origin", "HEAD"]).err();
+    let mut info = inspect_repo(&PathBuf::from(&path));
+    if let Some(err) = push_err {
+        mark_remote_unreachable(&mut info, err);
+    }
+    info
 }
 
 /// Ouvre le dossier du projet dans l'explorateur de fichiers.
@@ -1075,15 +1132,46 @@ fn open_folder(path: String) -> Result<(), String> {
     }
 }
 
+const VSCODE_NOT_FOUND: &str = "VS Code introuvable (la commande `code` n'est pas dans le PATH).";
+
+/// Résout le chemin complet du script `code.cmd` sur le PATH. `where` est un
+/// exécutable natif appelé avec un argument fixe ("code") : aucun risque
+/// d'injection à cette étape, quel que soit le contenu de `path` plus tard.
+#[cfg(windows)]
+fn find_code_cmd() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = std::process::Command::new("where");
+    cmd.arg("code");
+    cmd.creation_flags(0x0800_0000);
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|l| l.to_lowercase().ends_with(".cmd"))
+        .map(str::to_string)
+}
+
 /// Ouvre le projet dans VS Code (`code <path>`).
 #[tauri::command]
 fn open_in_editor(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
-        // `code` est un `.cmd` sous Windows : on passe par `cmd /C`.
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", "code", &path]);
         use std::os::windows::process::CommandExt;
+        // `code` est un script `.cmd` sous Windows : `Command::new("code")`
+        // seul ne le trouve pas (pas de résolution PATHEXT), et passer par
+        // `cmd /C code <path>` réintroduirait un interpréteur de commandes
+        // qui réinterprète `&`/`|` comme des séparateurs et `%VAR%` comme des
+        // variables d'environnement, y compris pour un chemin de projet local
+        // qui contiendrait ces caractères. On résout donc le chemin complet
+        // de `code.cmd` puis on l'exécute directement par ce chemin : Windows
+        // sait lancer un `.cmd` désigné par son chemin complet sans passer
+        // par un interpréteur, donc `path` n'est jamais réinterprété.
+        let code_cmd_path = find_code_cmd().ok_or(VSCODE_NOT_FOUND)?;
+        let mut cmd = std::process::Command::new(&code_cmd_path);
+        cmd.arg(&path);
         cmd.creation_flags(0x0800_0000);
         let output = cmd.output().map_err(|e| e.to_string())?;
         if output.status.success() {
@@ -1091,7 +1179,7 @@ fn open_in_editor(path: String) -> Result<(), String> {
         } else {
             let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
             Err(if err.is_empty() {
-                "VS Code introuvable (la commande `code` n'est pas dans le PATH).".into()
+                VSCODE_NOT_FOUND.into()
             } else {
                 err
             })
@@ -1144,11 +1232,17 @@ fn open_url(url: String) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", "start", "", &url]);
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-        cmd.spawn().map_err(|e| e.to_string())?;
+        // `url` vient du remote Git du projet (donc potentiellement d'un dépôt
+        // tiers non fiable) : on évite `cmd /C start` qui réinterprète des
+        // métacaractères comme `&` ou `|` comme des séparateurs de commande
+        // même à l'intérieur d'une URL a priori inoffensive (ex.
+        // "...?a=1&b=2"), ouvrant la porte à de l'injection de commande.
+        // `explorer.exe` délègue à l'application par défaut pour ce schéma
+        // sans repasser par un interpréteur de commandes.
+        std::process::Command::new("explorer")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
     #[cfg(not(windows))]

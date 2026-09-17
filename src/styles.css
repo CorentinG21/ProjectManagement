@@ -530,11 +530,24 @@ svg {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 18px;
+  padding: 18px 22px 18px 18px;
   display: flex;
   align-items: center;
   gap: 14px;
   box-shadow: var(--shadow);
+}
+
+.stat-text {
+  /* Sans ça, un flex-item garde par défaut la largeur intrinsèque de son
+     contenu (min-width: auto) : un mot insécable comme "Supprimables" ne
+     pouvant pas se couper, il débordait du padding de la carte quelle que
+     soit sa taille au lieu de passer à la ligne. */
+  min-width: 0;
+}
+
+.stat-value,
+.stat-label {
+  overflow-wrap: break-word;
 }
 
 .stat-icon {
@@ -723,6 +736,21 @@ svg {
   align-items: center;
   gap: 10px;
   font-size: 13px;
+  border-radius: 8px;
+  padding: 3px 6px;
+  margin: -3px -6px;
+}
+
+.leg-clickable {
+  cursor: pointer;
+}
+
+.leg-clickable:hover {
+  background: var(--bg);
+}
+
+.leg-clickable:hover .leg-name {
+  color: var(--text);
 }
 
 .leg-dot {
@@ -1537,7 +1565,7 @@ svg {
 }
 
 .chips:empty::after {
-  content: "Aucun dossier — ajoutes-en un ci-dessous.";
+  content: "Aucun dossier - ajoutes-en un ci-dessous.";
   color: var(--text-faint);
   font-size: 12.5px;
 }
